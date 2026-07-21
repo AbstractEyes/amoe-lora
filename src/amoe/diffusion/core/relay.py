@@ -24,6 +24,11 @@ from ...core.adapter import SquaredReLU
 class RelayPatch2D(nn.Module):
     """forward(x[..., d]) = x + sigmoid(gate) * consume(m_hat(proj(x) slots))."""
 
+    # Hosts dispatch on this: relays ignore the sigma axis, multiband
+    # modules require band windows. Marked on both so a caller never has
+    # to guess from the class name.
+    needs_bands = False
+
     def __init__(self, d: int, n_slots: int = 16, K: int = 64,
                  tau: float = 0.1, hidden: int = 178):
         super().__init__()
