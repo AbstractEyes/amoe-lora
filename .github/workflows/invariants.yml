@@ -1,0 +1,28 @@
+# The house laws, enforced on every push.
+#
+# The invariant suites are CPU-only and download nothing (they run on tiny
+# synthetic trunks), so this is a cheap, fast guard on the contracts that
+# cost real GPU hours to establish: the toggle law, bit-exact detach, the
+# zero-init inertness contract, the dtype law, and the band-coordinate law.
+name: invariants
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install torch (CPU) + safetensors
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install safetensors
+      - name: Run the invariant suites
+        run: python tests/test_invariants.py

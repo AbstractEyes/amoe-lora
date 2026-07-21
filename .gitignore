@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.idea/
+.vscode/
+.pytest_cache/
+
+# adapter weights never live in the code repo — they ship on the hub
+*.pt
+*.safetensors
