@@ -46,6 +46,8 @@ class TinyConfig:
     channels: int = 1               # 3 for RGB (cifar)
     input_mode: str = "linear"      # "linear" | "trigram"
     n_bins: int = 256               # byte quantization for the trigram embed
+    readout_dim: int = 16           # per-token bottleneck before the flatten
+                                    # readout (trigram only; keeps r*T small)
 
 
 @dataclass
@@ -159,8 +161,19 @@ class TinyTrunk(nn.Module):
         self.blocks = nn.ModuleList([LinearBlock(d)
                                      for _ in range(cfg.n_blocks)])
         self.norm = nn.LayerNorm(d)
-        # flatten, never mean-pool (house law)
-        self.readout = nn.Linear(d * T, cfg.n_classes)
+        # Readout aggregates across tokens by FLATTEN (never mean-pool — house
+        # law). At trigram T (784-1024) a d*T readout explodes: d=1024 -> a
+        # ~1M-wide flatten, a ~2GB activation that WDDM-spills and crawls. So
+        # trigram gets a per-token bottleneck d->r BEFORE the flatten — r*T
+        # stays small and positional info survives (not GAP). Linear mode
+        # (T=1, d*T=d) needs none and keeps its exact prior readout.
+        if self.trigram:
+            self.readout_dim = min(cfg.readout_dim, d)
+            self.readout_proj = nn.Linear(d, self.readout_dim)
+            self.readout = nn.Linear(self.readout_dim * T, cfg.n_classes)
+        else:
+            self.readout_proj = None
+            self.readout = nn.Linear(d * T, cfg.n_classes)
 
     # -- the probe shim ------------------------------------------------
     def _from_ids(self, ids: torch.Tensor) -> torch.Tensor:
@@ -188,8 +201,10 @@ class TinyTrunk(nn.Module):
         for blk in self.blocks:
             out = blk(h)
             h = out[0] if isinstance(out, tuple) else out
-        h = self.norm(h).reshape(h.shape[0], -1)
-        logits = self.readout(h)
+        h = self.norm(h)
+        if self.readout_proj is not None:
+            h = self.readout_proj(h)           # (B,T,d) -> (B,T,r) bottleneck
+        logits = self.readout(h.reshape(h.shape[0], -1))
         loss = None if labels is None else F.cross_entropy(logits, labels)
         return TrunkOutput(logits=logits, loss=loss)
 
@@ -211,7 +226,10 @@ class TinyTrunk(nn.Module):
             for p in m.parameters():
                 p.requires_grad_(True)
         if n:                       # a moving trunk owns its readout path
-            for m in (self.stem, self.norm, self.readout):
+            mods = [self.stem, self.norm, self.readout]
+            if self.readout_proj is not None:
+                mods.append(self.readout_proj)
+            for m in mods:
                 for p in m.parameters():
                     p.requires_grad_(True)
         return {"trainable_blocks": n,

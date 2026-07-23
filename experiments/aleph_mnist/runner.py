@@ -415,7 +415,12 @@ def main(argv=None) -> None:
     big = args.big
     steps = args.steps if args.steps is not None else (2000 if big else 1500)
     pre = args.pretrain_steps if args.pretrain_steps is not None else steps
-    batch = args.batch if args.batch is not None else (1024 if big else 128)
+    if args.batch is not None:
+        batch = args.batch
+    elif args.trigram:              # T ~1000x the linear bed -> modest step
+        batch = 256
+    else:
+        batch = 1024 if big else 128
     if args.train_n is None:
         train_n = None if big else 4096         # big defaults to the FULL set
     else:

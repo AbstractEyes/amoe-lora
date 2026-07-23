@@ -175,7 +175,14 @@ byte_emb×3 stem — the canonical AlephLM input — in two forms:
 Pixels are quantized to byte levels; the per-token blocks stay per-token (no
 cross-token mixing), so the flatten readout does the spatial aggregation and the
 aleph reads each pixel-trigram exactly as it reads each token in the LM. **This
-is the real test of whether the address manifests on pixels** — and it pairs
+is the real test of whether the address manifests on pixels**
+
+**Cost.** Trigram turns each image into a `T=784–1024` sequence — ≈1000× the
+linear bed's single token — so it runs at smaller `d` and batch (the notebook and
+`--trigram` pick these automatically). A `d·T` flatten readout would explode at
+large `d` (d=1024 → a ~1M-wide flatten, a ~2 GB activation that WDDM-spills and
+crawls), so a per-token bottleneck `d→readout_dim` (default 16) precedes the
+flatten — `readout_dim·T` stays small and memory is flat across widths. — and it pairs
 with law 2 (the address must parameterize the output): if trigram *input* alone
 still ties, the objective is the remaining lever (a next-pixel-byte / trigram-
 reconstruction head, where the address parameterizes the prediction).
