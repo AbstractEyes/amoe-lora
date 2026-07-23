@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 import torch
 
@@ -39,7 +39,7 @@ from amoe import laws
 from amoe.io.checkpoint import AnchorCheckpoint
 
 from . import probes
-from .data import Bed, build_bed
+from .data import DATASET_PIXELS, Bed, build_bed
 from .heads import anchor_state, build_heads
 from .trunk import build_trunk
 
@@ -57,7 +57,7 @@ class RunConfig:
     tokens: int = 1
     # data
     dataset: str = "mnist"
-    train_n: int = 4096
+    train_n: int | None = 4096      # None = the full training set
     batch: int = 128
     synthetic: bool = False
     # schedule
@@ -83,8 +83,9 @@ def pretrain(cfg: RunConfig, bed: Bed) -> dict:
     """Train the bare trunk. Shared by every cell at this seed so the
     dial compares arms, not initializations."""
     laws.pin_precision()
-    trunk = build_trunk(cfg.d, cfg.n_blocks, cfg.tokens,
-                        seed=cfg.seed).to(cfg.device)
+    trunk = build_trunk(cfg.d, cfg.n_blocks, cfg.tokens, seed=cfg.seed,
+                        pixels=bed.pixels,
+                        n_classes=bed.n_classes).to(cfg.device)
     if cfg.pretrain_steps == 0:
         return {k: v.cpu().clone() for k, v in trunk.state_dict().items()}
     trunk.set_trainable_blocks(cfg.n_blocks)
@@ -110,8 +111,9 @@ def pretrain(cfg: RunConfig, bed: Bed) -> dict:
 def run(cfg: RunConfig, bed: Bed, base_state: dict | None = None) -> dict:
     laws.pin_precision()
     torch.manual_seed(cfg.seed)
-    trunk = build_trunk(cfg.d, cfg.n_blocks, cfg.tokens,
-                        seed=cfg.seed).to(cfg.device)
+    trunk = build_trunk(cfg.d, cfg.n_blocks, cfg.tokens, seed=cfg.seed,
+                        pixels=bed.pixels,
+                        n_classes=bed.n_classes).to(cfg.device)
     if base_state is not None:
         trunk.load_state_dict({k: v.to(cfg.device)
                                for k, v in base_state.items()})
@@ -153,6 +155,10 @@ def run(cfg: RunConfig, bed: Bed, base_state: dict | None = None) -> dict:
         row["inertness_at_attach"] = probes.inertness(
             trunk, wrappers, bed.xte[:512])
 
+    cuda = cfg.device.startswith("cuda") and torch.cuda.is_available()
+    if cuda:
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.synchronize()
     t0 = time.time()
     trunk.train()
     for step, (xb, yb) in enumerate(
@@ -165,6 +171,16 @@ def run(cfg: RunConfig, bed: Bed, base_state: dict | None = None) -> dict:
             # BEFORE opt.step(): the grads are live exactly here
             spread = _democracy(trunk_params, head_params)
         opt.step()
+        if step == 1 and cuda:
+            # MANIFEST rider: always print peak_mem + s/step at an early
+            # step so an overrun fails LOUD instead of silently spilling.
+            torch.cuda.synchronize()
+            peak = torch.cuda.max_memory_allocated() / 1024**3
+            row["peak_gib"] = round(peak, 3)
+            row["s_per_step"] = round(time.time() - t0, 4)
+            print(f"[{cfg.cell}] step1 peak={peak:.2f}GiB "
+                  f"s/step={row['s_per_step']:.3f} d={cfg.d} "
+                  f"batch={cfg.batch}", flush=True)
         if step % cfg.probe_every == 0 or step == 1:
             ev = probes.evaluate(trunk, bed.xte, bed.yte)
             snap = {"step": step, "train_loss": lv, **ev,
@@ -218,8 +234,9 @@ def save_anchor(row: dict, path: str) -> str:
     if art is None:
         raise ValueError("this row has no adapter to save")
     cfg = row["config"]
-    meta = {"name": f"mnist-{cfg['mode']}-dial{cfg['trainable_blocks']}",
-            "base_model_id": "tiny-mnist-4block",
+    meta = {"name": f"{cfg['dataset']}-{cfg['mode']}-d{cfg['d']}"
+                    f"-dial{cfg['trainable_blocks']}",
+            "base_model_id": f"tiny-{cfg['dataset']}-4block",
             "d": cfg["d"], "n_layers": cfg["n_blocks"],
             "sites": art["sites"], "seed": cfg["seed"], "precision": "fp32",
             "address_mode": cfg["mode"],      # NOT stock if != soft
@@ -289,6 +306,59 @@ def sweep(seeds=(0, 1), dial=DIAL, arms=ARMS, base: RunConfig | None = None,
     return rows
 
 
+# -------------------------------------------------------- the big sweep
+DIMS_CLIMB = (64, 128, 256, 512, 1024)
+DATASETS = ("mnist", "fashion", "cifar10")
+
+
+def grid(datasets=DATASETS, dims=DIMS_CLIMB, seeds=(0, 1, 2),
+         base: RunConfig | None = None, root: str = "./data",
+         ledger: str | None = None, include_scratch: bool = False
+         ) -> list[dict]:
+    """THE SUBSTRATE CLIMB. exp012's co-training win lived at d=384; the
+    seed-0 MNIST-at-d=64 tie says that substrate is below the complexity
+    where the address bottleneck is load-bearing. This walks d up the
+    ladder across three task difficulties, re-pretraining a fresh trunk at
+    every width, to find where (if anywhere) soft separates from the
+    passthrough control — L-AR8's real crossing.
+
+    One bed per dataset (shared across widths and seeds; full-set beds are
+    width-independent), a fresh phase-0 base per (dataset, d, seed)."""
+    base = base or RunConfig()
+    ledger = ledger or os.path.join(RESULTS, "grid.jsonl")
+    if base.device.startswith("cuda") and torch.cuda.is_available():
+        p = torch.cuda.get_device_properties(0)
+        print(f"[grid] card: {p.name} ({p.total_memory / 1024**3:.0f} GiB)",
+              flush=True)
+    print(f"[grid] datasets={list(datasets)} dims={list(dims)} "
+          f"seeds={list(seeds)} steps={base.steps} batch={base.batch} "
+          f"train_n={base.train_n} -> ledger {ledger}", flush=True)
+    rows = []
+    for dataset in datasets:
+        try:
+            bed = build_bed(dataset, base.train_n, seed=base.seed,
+                            root=root).to(base.device)
+        except Exception as e:
+            # A slow/failed mirror (CIFAR's default host is slow) must not
+            # sink an overnight run — the earlier datasets are already in
+            # the ledger. Skip and move on.
+            print(f"[grid] SKIP {dataset} — could not build bed ({e}). "
+                  "Drop the tar into root or set AMOE_CIFAR_URL; rerun with "
+                  f"--datasets {dataset} to fill it in.", flush=True)
+            continue
+        assert bed.pixels == DATASET_PIXELS[dataset], "pixel-count mismatch"
+        print(f"[grid] {bed.name}: train {tuple(bed.xtr.shape)} "
+              f"pixels={bed.pixels} neutral={list(bed.neutral)}", flush=True)
+        for d in dims:
+            print(f"[grid] ===== {dataset} d={d} =====", flush=True)
+            rows += sweep(seeds=seeds, base=replace(base, dataset=dataset,
+                                                    d=d),
+                          bed=bed, ledger=ledger,
+                          include_scratch=include_scratch)
+    print(f"[grid] done: {len(rows)} cells -> {ledger}", flush=True)
+    return rows
+
+
 def smoke(device: str = "cpu") -> list[dict]:
     """Shapes/parse only — 20 steps on synthetic data, never a result."""
     cfg = RunConfig(steps=20, pretrain_steps=20, probe_every=10,
@@ -303,27 +373,57 @@ def smoke(device: str = "cpu") -> list[dict]:
 
 def main(argv=None) -> None:
     """Colab-cell-safe entry: argparse only behind an explicit call, and
-    parse_known_args so ipykernel's injected -f never raises SystemExit."""
+    parse_known_args so ipykernel's injected -f never raises SystemExit.
+
+    Two modes:
+      (default) one dial sweep on --dataset at RunConfig's d.
+      --big     the substrate climb: grid over --datasets x --dims x
+                --seeds, full training sets, the workstation workout.
+    """
     import argparse
     p = argparse.ArgumentParser(add_help=False)
-    p.add_argument("--seeds", type=int, nargs="+", default=[0, 1])
-    p.add_argument("--steps", type=int, default=1500)
-    p.add_argument("--pretrain-steps", type=int, default=1500)
-    p.add_argument("--train-n", type=int, default=4096)
+    p.add_argument("--seeds", type=int, nargs="+", default=None)
+    p.add_argument("--steps", type=int, default=None)
+    p.add_argument("--pretrain-steps", type=int, default=None)
+    p.add_argument("--train-n", type=int, default=None,
+                   help="rows per class-balanced subset; <=0 or omit in "
+                        "--big = FULL set")
+    p.add_argument("--batch", type=int, default=None)
     p.add_argument("--dataset", default="mnist")
     p.add_argument("--arms", nargs="+", default=list(ARMS))
     p.add_argument("--dial", type=int, nargs="+", default=list(DIAL))
     p.add_argument("--codebook-init", default="random")
+    p.add_argument("--big", action="store_true",
+                   help="run the substrate-climb grid (workstation workout)")
+    p.add_argument("--dims", type=int, nargs="+", default=list(DIMS_CLIMB))
+    p.add_argument("--datasets", nargs="+", default=list(DATASETS))
+    p.add_argument("--scratch", action="store_true",
+                   help="also run the from-scratch co-training rows")
     p.add_argument("--smoke", action="store_true")
     args, _ = p.parse_known_args(argv)
     if args.smoke:
         smoke()
         return
-    base = RunConfig(steps=args.steps, pretrain_steps=args.pretrain_steps,
-                     train_n=args.train_n, dataset=args.dataset,
+
+    big = args.big
+    steps = args.steps if args.steps is not None else (2000 if big else 1500)
+    pre = args.pretrain_steps if args.pretrain_steps is not None else steps
+    batch = args.batch if args.batch is not None else (1024 if big else 128)
+    if args.train_n is None:
+        train_n = None if big else 4096         # big defaults to the FULL set
+    else:
+        train_n = None if args.train_n <= 0 else args.train_n
+    seeds = tuple(args.seeds) if args.seeds else ((0, 1, 2) if big else (0, 1))
+
+    base = RunConfig(steps=steps, pretrain_steps=pre, train_n=train_n,
+                     batch=batch, dataset=args.dataset,
                      codebook_init=args.codebook_init)
-    sweep(seeds=tuple(args.seeds), dial=tuple(args.dial),
-          arms=tuple(args.arms), base=base)
+    if big:
+        grid(datasets=tuple(args.datasets), dims=tuple(args.dims),
+             seeds=seeds, base=base, include_scratch=args.scratch)
+    else:
+        sweep(seeds=seeds, dial=tuple(args.dial), arms=tuple(args.arms),
+              base=base, include_scratch=args.scratch)
 
 
 if __name__ == "__main__":

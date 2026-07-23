@@ -156,7 +156,9 @@ class TinyTrunk(nn.Module):
 
 
 def build_trunk(d: int = 64, n_blocks: int = 4, tokens: int = 1,
-                seed: int = 0) -> TinyTrunk:
+                seed: int = 0, pixels: int = 784,
+                n_classes: int = 10) -> TinyTrunk:
     torch.manual_seed(seed)
     return TinyTrunk(TinyConfig(hidden_size=d, n_blocks=n_blocks,
-                                tokens=tokens))
+                                tokens=tokens, pixels=pixels,
+                                n_classes=n_classes))

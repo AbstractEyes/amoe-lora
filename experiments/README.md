@@ -153,11 +153,33 @@ destroyed — that gap is the sharpest thing this bed can show, and it
 bears directly on whether co-trained aleph artifacts can be shipped as
 detachable adapters at all.
 
+### Result so far (seed 0, d=64, MNIST) — Fork 2, provisionally
+
+The QUICK pass landed on **the tie**: `Δ(soft − none)` never crosses zero
+(−0.00016 / −0.00055 / −0.00026 / +0.00008 CE across the dial; sign
+unstable; the control wins accuracy at 3 of 4 positions). exp012's
+co-training win and exp013's −0.09 frozen tax **both fail to appear** —
+d=64 MNIST is below the substrate complexity where the address bottleneck
+is load-bearing, and the escape gauge confirms it (ratio < 1 on every
+pretrained cell: the adapter fires *harder* on scrambled input than on
+real digits). Two findings that are **not** noise: co-training dissolves
+the adapter's load-bearingness (toggle `damage_ce` goes negative once the
+trunk moves — turning the head off *improves* CE), and from scratch the
+adapter is a net liability the trunk grows to depend on (+6.4% toggle
+damage, yet a plain trunk beats every adapter arm). The gate sits
+0.05–0.06, *above* the 0.012–0.03 band, and rises. Single seed — the tie
+needs seeds, and the real signal needs a bigger substrate.
+
 ### Running it
 
-Colab: open [`notebooks/aleph_mnist_cotrain.ipynb`](notebooks/aleph_mnist_cotrain.ipynb).
+Two Colab notebooks:
+[`aleph_mnist_climb.ipynb`](notebooks/aleph_mnist_climb.ipynb) is the full,
+maintained one (dial + the section-9 substrate climb);
+[`aleph_mnist_cotrain.ipynb`](notebooks/aleph_mnist_cotrain.ipynb) is the
+original, kept as the **executed seed-0 record** (its cells carry the run
+outputs this result is read from).
 
-Locally, from a checkout with `pip install -e .`:
+Locally, from a checkout with `pip install -e .` — one dial sweep:
 
 ```bash
 python -m aleph_mnist.runner --seeds 0 1 --steps 1500 --pretrain-steps 1500
@@ -169,10 +191,37 @@ Shapes/parse smoke (synthetic data, no download, seconds):
 python -m aleph_mnist.runner --smoke
 ```
 
-Every cell appends a JSON row to `experiments/results/ledger.jsonl`;
-`plots.figure_set(rows)` and `plots.verdict_table(rows)` read it back.
-The ledger is the shippable evidence — figures are derived from it, never
-hand-transcribed.
+### Scaling up — the substrate climb (`--big`)
+
+The seed-0 tie says: climb the substrate on **full** training sets until
+the bottleneck becomes load-bearing. `--big` runs the grid — `d ∈
+{64,128,256,512,1024}` × `{mnist, fashion, cifar10}` × seeds 0–2, full
+sets, a fresh phase-0 trunk at every width. exp012's win lived at d=384,
+so the ladder brackets it.
+
+```bash
+python -m aleph_mnist.runner --big                       # the whole climb
+python -m aleph_mnist.runner --big --datasets mnist fashion   # skip cifar
+python -m aleph_mnist.runner --big --dims 64 256 1024 --batch 2048 --seeds 0 1
+```
+
+Every cell prints peak VRAM + s/step at its first step (the WDDM rider —
+an overrun fails loud, never silently spills). These trunks are tiny
+(≈0.1 GiB at d=64), so the card is **compute-bound, not memory-bound**:
+the workout is sustained utilization across the ~450-cell climb on full
+data. To actually stress VRAM, push `--batch 8192` and/or `--dims 2048`.
+
+**CIFAR-10 mirror.** torchvision's default host (cs.toronto.edu) is slow.
+The grid runs cifar **last** and **skips it** if the download fails, so
+mnist+fashion complete regardless. To include it: drop
+`cifar-10-python.tar.gz` into the data root from any fast source (md5 is
+checked, so it's reused), or set `AMOE_CIFAR_URL` to a faster host of that
+exact tar.
+
+Every cell appends a JSON row to a ledger (`results/ledger.jsonl` for a
+sweep, `results/grid.jsonl` for `--big`); `plots.figure_set(rows)` and
+`plots.verdict_table(rows)` read it back. The ledger is the shippable
+evidence — figures are derived from it, never hand-transcribed.
 
 ### House riders observed
 
