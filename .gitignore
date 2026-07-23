@@ -14,7 +14,10 @@ venv/
 *.safetensors
 
 # experiment run outputs (ledgers are shipped with the write-up, not the code)
-results/
+# NOTE: these are ANCHORED with a leading slash on purpose. A bare `data/`
+# also matches src/aleph_mnist/data/ and would silently drop the dataloader
+# subpackage from the wheel (it did — caught by a git-install smoke).
+/results/
+/data/
 experiments/results/
 experiments/**/data/
-data/
