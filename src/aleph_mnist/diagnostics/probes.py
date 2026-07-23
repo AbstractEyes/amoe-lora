@@ -44,7 +44,7 @@ import torch.nn.functional as F
 from amoe import laws
 
 from . import vitals
-from .heads import set_adapters
+from ..model.heads import set_adapters
 
 MOD = (1 << 31) - 1          # keeps folded codes inside int64
 
@@ -97,12 +97,40 @@ def inertness(trunk, wrappers, x) -> dict:
                 (on.argmax(-1) != off.argmax(-1)).float().mean())}
 
 
+# ------------------------------------------------- probe batch budgets
+PROBE_TOKEN_BUDGET = 65536   # rows x tokens for the amplitude/code probes
+ALIVE_TOKEN_BUDGET = 4096    # rows x tokens for the 2K-materializing readout
+
+
+def _cap_rows(trunk, x, budget: int):
+    """Cap a probe batch so `rows * tokens` stays bounded.
+
+    In linear mode T=1, so `budget // T` exceeds any batch we pass and
+    NOTHING is capped — behavior is identical to before. Under the trigram
+    stem T is 784-1024, and these probes are quadratic in it:
+
+      * `delta_ratio` captures (rows, T, d) twice per block;
+      * `axis_aliveness` materializes the EXPLICIT (rows, T, slots, 2K)
+        oriented softmax — precisely the tensor the closed form exists to
+        avoid (it was the campaign's original memory wall). At T=784 with
+        1024 rows that is ~822M floats (~3.3 GB) and the probe stops being
+        a probe.
+
+    Sampling rows is statistically free here: the aliveness histogram sees
+    rows x T x slots address reads, so even a handful of rows gives tens of
+    thousands of samples for a 128-bin histogram.
+    """
+    T = max(1, int(getattr(trunk, "n_tokens", 1)))
+    return x[:max(8, budget // T)]
+
+
 # ------------------------------------------------------ delta amplitude
 @torch.no_grad()
 def delta_ratio(trunk, heads, x) -> list[float]:
     """Per-block ||A(h) - h|| / ||h||: how much of the residual stream
     the adapter is rewriting. The single-anchor amplitude gauge."""
     trunk.eval()
+    x = _cap_rows(trunk, x, PROBE_TOKEN_BUDGET)
     with capture(heads) as store:
         trunk(x)
     out = []
@@ -167,12 +195,36 @@ def _mutual_information(a: torch.Tensor, b: torch.Tensor) -> float:
     return max(0.0, mi - bias)
 
 
+MI_MAX_COLS = 64      # bound the per-column sweep — see _sample_cols
+
+
+def _sample_cols(ncol: int, k: int = MI_MAX_COLS) -> torch.Tensor:
+    """Evenly-spaced column sample.
+
+    The code matrix is (B, T*S). In linear mode T=1 so T*S is 16 and every
+    column is cheap. Under the trigram stem T is 784-1024, so T*S reaches
+    ~12.5k PER BLOCK — sweeping all of them means ~50k mutual-information
+    computations per cell, which turns the end-of-run probe into an
+    effective hang. An evenly-spaced sample across positions and slots
+    answers the same question (how much label information does the most
+    selective slot carry) at bounded cost."""
+    if ncol <= k:
+        return torch.arange(ncol)
+    return torch.linspace(0, ncol - 1, k).round().long().unique()
+
+
 @torch.no_grad()
 def sign_code_report(trunk, heads, x, y) -> dict:
     """Unique committed codes per block, the composed whole-organism path
     count, and the label information the most selective slot carries.
-    H(digit) = ln 10 = 2.303 nats is the ceiling."""
+    H(digit) = ln 10 = 2.303 nats is the ceiling.
+
+    For wide code matrices (the trigram stem) the per-column statistics are
+    computed over an evenly-spaced sample of columns; `cols_sampled` and
+    `cols_total` in each entry record exactly what was measured."""
     trunk.eval()
+    x = _cap_rows(trunk, x, PROBE_TOKEN_BUDGET)
+    y = y[:x.shape[0]]
     with capture(heads) as store:
         trunk(x)
     K2 = 2 * heads[0].addr.K
@@ -181,12 +233,15 @@ def sign_code_report(trunk, heads, x, y) -> dict:
         inp, _ = store[k]
         codes = h.sign_code(inp)                     # (B, T, S)
         codes = codes.reshape(codes.shape[0], -1)    # (B, T*S)
-        fid = _fold(codes, K2)
+        cols = _sample_cols(codes.shape[1]).to(codes.device)
+        sub = codes[:, cols]
+        fid = _fold(sub, K2)
         block_ids.append(fid)
         per_block.append(vitals.path_diversity(fid))
-        mis = [_mutual_information(codes[:, s], y)
-               for s in range(codes.shape[1])]
-        slot_mi.append({"max": max(mis), "mean": sum(mis) / len(mis)})
+        mis = [_mutual_information(sub[:, i], y) for i in range(sub.shape[1])]
+        slot_mi.append({"max": max(mis), "mean": sum(mis) / len(mis),
+                        "cols_sampled": int(sub.shape[1]),
+                        "cols_total": int(codes.shape[1])})
     whole = _fold(torch.stack(block_ids, dim=-1), MOD % (1 << 20))
     return {"per_block_unique": [d["unique_raw"] for d in per_block],
             "organism_unique": vitals.path_diversity(whole)["unique_raw"],
@@ -233,6 +288,8 @@ def vitals_report(trunk, heads, x=None) -> dict:
     rep["binding_target"] = vitals.BINDING
     if x is not None:
         trunk.eval()
+        # the explicit 2K materialization is the expensive one — sample hard
+        x = _cap_rows(trunk, x, ALIVE_TOKEN_BUDGET)
         with capture(heads) as store:
             trunk(x)
         alive = []

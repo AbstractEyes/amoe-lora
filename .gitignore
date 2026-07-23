@@ -14,5 +14,7 @@ venv/
 *.safetensors
 
 # experiment run outputs (ledgers are shipped with the write-up, not the code)
+results/
 experiments/results/
 experiments/**/data/
+data/

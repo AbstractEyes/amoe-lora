@@ -1,5 +1,5 @@
-"""TinyTrunk — a 4-block linear MNIST classifier, shaped so amoe can
-attach to it unmodified.
+"""TinyTrunk — a 4-block linear classifier, shaped so amoe can attach to it
+unmodified.
 
 Three things make this a valid amoe substrate rather than a toy:
 
@@ -7,30 +7,31 @@ Three things make this a valid amoe substrate rather than a toy:
    (B, T, d) stream — the same object a decoder block hands the adapter.
    "Linear" here means linear-algebraic: no attention, no convolution.
 2. A CONFIG SHIM. `binding.PathBinding` reads `model.config.hidden_size`
-   and `attach(strict=...)` reads `_name_or_path`, so the trunk carries
-   an HF-shaped config object.
-3. AN `input_ids` PROBE PATH. `runtime.attach._probe` fingerprints a
-   model by calling `model(input_ids=...)` with an int tensor — it is
-   written for causal LMs. Rather than fork attach(), the trunk accepts
-   `input_ids` and maps it DETERMINISTICALLY to a float input, which
-   makes the bit-exact detach guarantee testable here for real. The
-   LM-shaped probe is a portability wart in amoe 0.2.2, noted in the
-   experiments README.
+   and `attach(strict=...)` reads `_name_or_path`, so the trunk carries an
+   HF-shaped config object.
+3. AN `input_ids` PROBE PATH. `runtime.attach._probe` fingerprints a model
+   by calling `model(input_ids=...)` with an int tensor — it is written for
+   causal LMs. Rather than fork attach(), the trunk accepts `input_ids` and
+   maps it DETERMINISTICALLY to a float input, which makes the bit-exact
+   detach guarantee testable here for real.
 
 NO GLOBAL AVERAGE POOLING anywhere (house law: GAP collapsed a geometric
-encoder 70% -> 29%, replicated). The T>1 readout flattens.
+encoder 70% -> 29%, replicated). The readout flattens.
 
-CAPACITY IS DELIBERATELY STARVED (d=64, 4096 train rows by default).
-Full MNIST on a 4-block MLP saturates ~98% and compresses every arm
-difference into seed noise; a starved bed is the measurement instrument.
+Construct trunks with `model.build.build_model(bed, cfg)` — it derives every
+shape from the dataset and validates parity. `build_trunk` below is the
+low-level constructor it delegates to; calling it directly is how shape
+mismatches used to sneak in.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from .stem import TrigramStem
 
 
 @dataclass
@@ -38,16 +39,17 @@ class TinyConfig:
     """HF-shaped enough for amoe's resolver, binding and strict check."""
     hidden_size: int = 64
     model_type: str = "tiny_mnist"
-    _name_or_path: str = "tiny-mnist-4block"
+    _name_or_path: str = "tiny-mnist-4block"   # per-dataset; set by build_model
     n_blocks: int = 4
     tokens: int = 1
     n_classes: int = 10
     pixels: int = 784
-    channels: int = 1               # 3 for RGB (cifar)
+    channels: int = 1               # 3 for RGB == the trigram order
     input_mode: str = "linear"      # "linear" | "trigram"
     n_bins: int = 256               # byte quantization for the trigram embed
     readout_dim: int = 16           # per-token bottleneck before the flatten
-                                    # readout (trigram only; keeps r*T small)
+    trigram_lo: float = -3.0        # quantization window, PER DATASET
+    trigram_hi: float = 3.0
 
 
 @dataclass
@@ -61,66 +63,9 @@ class SquaredReLU(nn.Module):
         return F.relu(x) ** 2
 
 
-class TrigramStem(nn.Module):
-    """byte_emb x3 — the canonical aleph input (discovery #16: CHANNEL COUNT =
-    N-GRAM ORDER). A single linear projection of a normalized pixel gives the
-    address a *unigram*: one value per position, nothing three-way to bind, so
-    the addressed read cannot pull ahead of a passthrough (the L-AR8 vision
-    tie was this artifact). The trigram lineage (AlephLM, byte_emb x3;
-    L-AR5: -10% bpb, and it *differentially* benefits the addressed head)
-    restores that structure.
-
-    Two forms, per the research:
-      channel  — RGB pixel = a natural byte-trigram (R,G,B); embed each channel
-                 with its own table and sum. "byte-trigram-as-RGB engaged first
-                 try" (tri_band_omega_arc). T = H*W tokens.
-      spatial  — grayscale has no channel trigram, so form the sequence one:
-                 emb0(px_t) + emb1(px_{t-1}) + emb2(px_{t-2}), past-only — the
-                 exact AlephLM form with pixels as the bytes. T = pixels.
-
-    Pixels are quantized to `n_bins` byte levels over a fixed normalized range;
-    the embedding only needs same-value -> same-index (monotone in intensity).
-    A dedicated PAD index carries the pre-sequence positions so no float is a
-    hard zero (house law: every float must carry signal)."""
-
-    def __init__(self, d: int, channels: int, pixels: int,
-                 n_bins: int = 256, lo: float = -3.0, hi: float = 3.0):
-        super().__init__()
-        self.d, self.channels, self.n_bins = d, channels, n_bins
-        self.lo, self.hi = lo, hi
-        self.kind = "channel" if channels == 3 else "spatial"
-        self.hw = pixels // channels
-        self.n_tokens = self.hw if self.kind == "channel" else pixels
-        # +1 row = the past-only PAD index (spatial form)
-        self.embs = nn.ModuleList([nn.Embedding(n_bins + 1, d)
-                                   for _ in range(3)])
-        for e in self.embs:
-            nn.init.normal_(e.weight, std=0.02)
-
-    def _bin(self, x: torch.Tensor) -> torch.Tensor:
-        idx = ((x - self.lo) / (self.hi - self.lo) * self.n_bins).long()
-        return idx.clamp(0, self.n_bins - 1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B = x.shape[0]
-        if self.kind == "channel":                 # RGB byte-trigram
-            v = x.view(B, self.channels, self.hw)   # (B,3,HW) channel-major
-            idx = self._bin(v)
-            return sum(self.embs[c](idx[:, c]) for c in range(3))  # (B,HW,d)
-        idx = self._bin(x)                          # (B,T) raster
-        T = idx.shape[1]
-        out = self.embs[0](idx)                     # emb0(px_t)
-        for k in (1, 2):                            # + emb_k(px_{t-k}), past-only
-            shifted = torch.full((B, T), self.n_bins, dtype=torch.long,
-                                 device=x.device)
-            shifted[:, k:] = idx[:, :T - k]
-            out = out + self.embs[k](shifted)
-        return out                                  # (B,T,d)
-
-
 class LinearBlock(nn.Module):
-    """Pre-norm residual MLP block — the miniature of a decoder block
-    with the attention removed. SquaredReLU matches the adapter's own
+    """Pre-norm residual MLP block — the miniature of a decoder block with
+    the attention removed. SquaredReLU matches the adapter's own
     nonlinearity so the trunk and the patch head speak one dialect."""
 
     def __init__(self, d: int, mult: int = 2):
@@ -145,11 +90,12 @@ class TinyTrunk(nn.Module):
         self.trigram = cfg.input_mode == "trigram"
         if self.trigram:
             # byte_emb x3 stem: T is set by the trigram form, not cfg.tokens.
-            # NOTE: the blocks are per-token MLPs (no cross-token mixing), so
-            # spatial aggregation lives entirely in the flatten readout — the
-            # aleph read still operates per pixel-trigram, exactly as it does
-            # per token in the AlephLM.
-            self.stem = TrigramStem(d, cfg.channels, cfg.pixels, cfg.n_bins)
+            # The blocks are per-token MLPs (no cross-token mixing), so spatial
+            # aggregation lives entirely in the flatten readout — the aleph
+            # read still operates per pixel-trigram, exactly as it does per
+            # token in the AlephLM.
+            self.stem = TrigramStem(d, cfg.channels, cfg.pixels, cfg.n_bins,
+                                    cfg.trigram_lo, cfg.trigram_hi)
             T = self.stem.n_tokens
         else:
             T = cfg.tokens
@@ -178,8 +124,8 @@ class TinyTrunk(nn.Module):
     # -- the probe shim ------------------------------------------------
     def _from_ids(self, ids: torch.Tensor) -> torch.Tensor:
         """Deterministic int -> float image map, so amoe's LM-shaped
-        fingerprint probe works on a vision trunk. Pure function of the
-        ids: same ids, same activations, bit for bit."""
+        fingerprint probe works on a vision trunk. Pure function of the ids:
+        same ids, same activations, bit for bit."""
         base = torch.arange(self.config.pixels, device=ids.device,
                             dtype=torch.float32)
         seed = ids.float().sum(dim=-1, keepdim=True)
@@ -211,8 +157,8 @@ class TinyTrunk(nn.Module):
     # -- the dial ------------------------------------------------------
     def set_trainable_blocks(self, n: int) -> dict:
         """THE DIAL. Unfreeze the LAST `n` blocks (0 = fully frozen
-        substrate, n_blocks = full co-training). stem/norm/readout follow
-        the trunk: they are trunk, not adapter.
+        substrate, n_blocks = full co-training). stem/norm/readout follow the
+        trunk: they are trunk, not adapter.
 
         Returns the parameter census, which goes in the ledger — an arm
         comparison is meaningless without it."""
@@ -250,9 +196,16 @@ class TinyTrunk(nn.Module):
 
 def build_trunk(d: int = 64, n_blocks: int = 4, tokens: int = 1,
                 seed: int = 0, pixels: int = 784, n_classes: int = 10,
-                channels: int = 1, input_mode: str = "linear") -> TinyTrunk:
+                channels: int = 1, input_mode: str = "linear",
+                name_or_path: str = "tiny-mnist-4block",
+                trigram_lo: float = -3.0,
+                trigram_hi: float = 3.0) -> TinyTrunk:
+    """Low-level constructor. Prefer `build_model(bed, cfg)`, which derives
+    and validates these fields from the dataset instead of trusting the
+    caller to pass them consistently."""
     torch.manual_seed(seed)
-    return TinyTrunk(TinyConfig(hidden_size=d, n_blocks=n_blocks,
-                                tokens=tokens, pixels=pixels,
-                                n_classes=n_classes, channels=channels,
-                                input_mode=input_mode))
+    return TinyTrunk(TinyConfig(
+        hidden_size=d, n_blocks=n_blocks, tokens=tokens, pixels=pixels,
+        n_classes=n_classes, channels=channels, input_mode=input_mode,
+        _name_or_path=name_or_path,
+        trigram_lo=trigram_lo, trigram_hi=trigram_hi))

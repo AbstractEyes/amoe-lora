@@ -13,13 +13,16 @@ is decoration.
   fig_democracy     trunk vs adapter gradient norms over training.
 
 matplotlib only; no seaborn, no style sheets, one chart per figure.
+
+matplotlib is imported LAZILY inside each figure function, never at module
+level: `import aleph_mnist` must stay light enough to work on a base
+install (torch + amoe only), so the console script loads and `verdict_table`
+runs without the `[experiment]` extra. Only the plotting calls need it.
 """
 from __future__ import annotations
 
 import json
 from collections import defaultdict
-
-import matplotlib.pyplot as plt
 
 from .vitals import BINDING, GATE_BAND
 
@@ -43,6 +46,7 @@ def _mean(vals):
 
 def fig_dial(rows, control: str = "none", metric: str = "ce", ax=None):
     """The headline. Negative delta = the arm beats the control."""
+    import matplotlib.pyplot as plt
     ax = ax or plt.subplots(figsize=(6, 4))[1]
     by = defaultdict(dict)
     for r in rows:
@@ -67,6 +71,7 @@ def fig_dial(rows, control: str = "none", metric: str = "ce", ax=None):
 
 
 def fig_gates(rows, ax=None):
+    import matplotlib.pyplot as plt
     ax = ax or plt.subplots(figsize=(6, 4))[1]
     ax.axhspan(*GATE_BAND, color="tab:green", alpha=0.15,
                label=f"candidate band {GATE_BAND[0]}-{GATE_BAND[1]}")
@@ -86,6 +91,7 @@ def fig_gates(rows, ax=None):
 
 
 def fig_drift(rows, ax=None):
+    import matplotlib.pyplot as plt
     ax = ax or plt.subplots(figsize=(6, 4))[1]
     ax.axhline(BINDING, color="tab:red", ls="--",
                label=f"binding constant {BINDING}")
@@ -107,6 +113,7 @@ def fig_drift(rows, ax=None):
 def fig_toggle(rows, ax=None):
     """Detachability tax: how much accuracy leaves when you switch the
     adapter off, by dial position."""
+    import matplotlib.pyplot as plt
     ax = ax or plt.subplots(figsize=(6, 4))[1]
     by = defaultdict(list)
     for r in rows:
@@ -129,6 +136,7 @@ def fig_toggle(rows, ax=None):
 
 
 def fig_escape(rows, neutral: str = "permuted", ax=None):
+    import matplotlib.pyplot as plt
     ax = ax or plt.subplots(figsize=(6, 4))[1]
     by = defaultdict(list)
     for r in rows:
@@ -153,6 +161,7 @@ def fig_escape(rows, neutral: str = "permuted", ax=None):
 
 
 def fig_democracy(rows, ax=None):
+    import matplotlib.pyplot as plt
     ax = ax or plt.subplots(figsize=(6, 4))[1]
     for r in rows:
         m, n, s, tag = _key(r)
@@ -173,6 +182,7 @@ def fig_democracy(rows, ax=None):
 
 
 def figure_set(rows, path: str | None = None):
+    import matplotlib.pyplot as plt
     fig, axes = plt.subplots(2, 3, figsize=(17, 9))
     fig_dial(rows, ax=axes[0][0])
     fig_toggle(rows, ax=axes[0][1])

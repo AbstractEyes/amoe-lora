@@ -163,7 +163,7 @@ not "the aleph is inert on vision," is why the linear-stem climb tied
 #16: **channel count = n-gram order**, and *byte-trigram-as-RGB engaged first
 try*.
 
-`input_mode="trigram"` (CLI `--trigram`, notebook `TRIGRAM=True`) swaps in the
+`input_mode="trigram"` (CLI `--trigram`) swaps in the
 byte_emb×3 stem — the canonical AlephLM input — in two forms:
 
 - **channel** (RGB, e.g. cifar): each pixel is a natural byte-trigram (R,G,B);
@@ -204,39 +204,52 @@ damage, yet a plain trunk beats every adapter arm). The gate sits
 0.05–0.06, *above* the 0.012–0.03 band, and rises. Single seed — the tie
 needs seeds, and the real signal needs a bigger substrate.
 
-### Running it
+### Install — one line, no `sys.path`, no restart
 
-Two Colab notebooks:
-[`aleph_mnist_climb.ipynb`](notebooks/aleph_mnist_climb.ipynb) is the full,
-maintained one (dial + the section-9 substrate climb);
-[`aleph_mnist_cotrain.ipynb`](notebooks/aleph_mnist_cotrain.ipynb) is the
-original, kept as the **executed seed-0 record** (its cells carry the run
-outputs this result is read from).
-
-Locally, from a checkout with `pip install -e .` — one dial sweep:
+The bed is a real package (`src/aleph_mnist`), installed from the branch:
 
 ```bash
-python -m aleph_mnist.runner --seeds 0 1 --steps 1500 --pretrain-steps 1500
+pip install "amoe-lora[experiment,experiment-hf] @ git+https://github.com/AbstractEyes/amoe-lora@experimental"
 ```
 
-Shapes/parse smoke (synthetic data, no download, seconds):
+Every dependency is a **floor** that Colab already satisfies (py3.12, torch
+2.10, torchvision 0.25, numpy 2.x), so pip reinstalls nothing binary and no
+runtime restart is needed. Drop `,experiment-hf` if you don't want the fast
+HF CIFAR path (a torchvision fallback covers it).
+
+**Notebook:** [`aleph_mnist.ipynb`](notebooks/aleph_mnist.ipynb) — install,
+probe, run. It never needs patching: to iterate, push to `@experimental`
+and re-run its install cell with `FORCE_REINSTALL = True`.
+
+### Running it — API and CLI are the same knobs
+
+```python
+from aleph_mnist import RunConfig, run_sweep, run_climb
+rows = run_sweep(RunConfig(dataset="mnist", d=64, input_mode="trigram"))
+```
 
 ```bash
-python -m aleph_mnist.runner --smoke
+aleph-mnist --smoke                          # shapes/parse, CPU, seconds
+aleph-mnist --dataset mnist --seeds 0 1      # one dial sweep
+aleph-mnist --big --trigram                  # the substrate climb
+python -m aleph_mnist --smoke                # same entry point
 ```
+
+Every CLI flag defaults to the matching `RunConfig` field, so the two faces
+cannot drift apart.
 
 ### Scaling up — the substrate climb (`--big`)
 
-The seed-0 tie says: climb the substrate on **full** training sets until
-the bottleneck becomes load-bearing. `--big` runs the grid — `d ∈
-{64,128,256,512,1024}` × `{mnist, fashion, cifar10}` × seeds 0–2, full
-sets, a fresh phase-0 trunk at every width. exp012's win lived at d=384,
-so the ladder brackets it.
+The d=64 tie says: climb the substrate on **full** training sets until the
+bottleneck becomes load-bearing. `--big` runs the grid — `d ∈
+{64,128,256,512,1024}` × `{mnist, fashion, cifar10}` × seeds, full sets, a
+fresh phase-0 trunk at every width. exp012's win lived at d=384, so the
+ladder brackets it.
 
 ```bash
-python -m aleph_mnist.runner --big                       # the whole climb
-python -m aleph_mnist.runner --big --datasets mnist fashion   # skip cifar
-python -m aleph_mnist.runner --big --dims 64 256 1024 --batch 2048 --seeds 0 1
+aleph-mnist --big                                  # the whole climb
+aleph-mnist --big --datasets mnist fashion         # skip cifar
+aleph-mnist --big --dims 64 256 1024 --seeds 0 1
 ```
 
 Every cell prints peak VRAM + s/step at its first step (the WDDM rider —
@@ -257,13 +270,15 @@ parquet over HF's CDN instead — ~37 s for the full 50k/10k here vs a
 - `AMOE_CIFAR_URL` — a faster host of `cifar-10-python.tar.gz` for the
   torchvision path (implies `torchvision`).
 
-HF needs the `datasets` library (present on Colab; `pip install datasets`
-otherwise); if it's missing or offline, the loader falls back to
-torchvision automatically. The grid still runs cifar **last** and skips it
-only if *both* sources fail, so mnist+fashion always complete.
+HF needs the `datasets` library — install the `[experiment-hf]` extra to
+get it. If it's missing or offline, the loader falls back to torchvision
+automatically. The grid runs cifar **last** and skips it only if *both*
+sources fail, so mnist+fashion always complete.
 
-Every cell appends a JSON row to a ledger (`results/ledger.jsonl` for a
-sweep, `results/grid.jsonl` for `--big`); `plots.figure_set(rows)` and
+Ledgers land under `$ALEPH_RESULTS` (default `./results` — no longer a
+cwd-relative `experiments/results` that an installed run would create in
+the wrong place). Every cell appends a JSON row (`ledger.jsonl` for a
+sweep, `grid.jsonl` for `--big`); `plots.figure_set(rows)` and
 `plots.verdict_table(rows)` read it back. The ledger is the shippable
 evidence — figures are derived from it, never hand-transcribed.
 
