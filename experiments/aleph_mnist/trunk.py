@@ -43,6 +43,9 @@ class TinyConfig:
     tokens: int = 1
     n_classes: int = 10
     pixels: int = 784
+    channels: int = 1               # 3 for RGB (cifar)
+    input_mode: str = "linear"      # "linear" | "trigram"
+    n_bins: int = 256               # byte quantization for the trigram embed
 
 
 @dataclass
@@ -54,6 +57,63 @@ class TrunkOutput:
 class SquaredReLU(nn.Module):
     def forward(self, x):
         return F.relu(x) ** 2
+
+
+class TrigramStem(nn.Module):
+    """byte_emb x3 — the canonical aleph input (discovery #16: CHANNEL COUNT =
+    N-GRAM ORDER). A single linear projection of a normalized pixel gives the
+    address a *unigram*: one value per position, nothing three-way to bind, so
+    the addressed read cannot pull ahead of a passthrough (the L-AR8 vision
+    tie was this artifact). The trigram lineage (AlephLM, byte_emb x3;
+    L-AR5: -10% bpb, and it *differentially* benefits the addressed head)
+    restores that structure.
+
+    Two forms, per the research:
+      channel  — RGB pixel = a natural byte-trigram (R,G,B); embed each channel
+                 with its own table and sum. "byte-trigram-as-RGB engaged first
+                 try" (tri_band_omega_arc). T = H*W tokens.
+      spatial  — grayscale has no channel trigram, so form the sequence one:
+                 emb0(px_t) + emb1(px_{t-1}) + emb2(px_{t-2}), past-only — the
+                 exact AlephLM form with pixels as the bytes. T = pixels.
+
+    Pixels are quantized to `n_bins` byte levels over a fixed normalized range;
+    the embedding only needs same-value -> same-index (monotone in intensity).
+    A dedicated PAD index carries the pre-sequence positions so no float is a
+    hard zero (house law: every float must carry signal)."""
+
+    def __init__(self, d: int, channels: int, pixels: int,
+                 n_bins: int = 256, lo: float = -3.0, hi: float = 3.0):
+        super().__init__()
+        self.d, self.channels, self.n_bins = d, channels, n_bins
+        self.lo, self.hi = lo, hi
+        self.kind = "channel" if channels == 3 else "spatial"
+        self.hw = pixels // channels
+        self.n_tokens = self.hw if self.kind == "channel" else pixels
+        # +1 row = the past-only PAD index (spatial form)
+        self.embs = nn.ModuleList([nn.Embedding(n_bins + 1, d)
+                                   for _ in range(3)])
+        for e in self.embs:
+            nn.init.normal_(e.weight, std=0.02)
+
+    def _bin(self, x: torch.Tensor) -> torch.Tensor:
+        idx = ((x - self.lo) / (self.hi - self.lo) * self.n_bins).long()
+        return idx.clamp(0, self.n_bins - 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B = x.shape[0]
+        if self.kind == "channel":                 # RGB byte-trigram
+            v = x.view(B, self.channels, self.hw)   # (B,3,HW) channel-major
+            idx = self._bin(v)
+            return sum(self.embs[c](idx[:, c]) for c in range(3))  # (B,HW,d)
+        idx = self._bin(x)                          # (B,T) raster
+        T = idx.shape[1]
+        out = self.embs[0](idx)                     # emb0(px_t)
+        for k in (1, 2):                            # + emb_k(px_{t-k}), past-only
+            shifted = torch.full((B, T), self.n_bins, dtype=torch.long,
+                                 device=x.device)
+            shifted[:, k:] = idx[:, :T - k]
+            out = out + self.embs[k](shifted)
+        return out                                  # (B,T,d)
 
 
 class LinearBlock(nn.Module):
@@ -79,11 +139,23 @@ class TinyTrunk(nn.Module):
         super().__init__()
         cfg = config or TinyConfig()
         self.config = cfg
-        d, T = cfg.hidden_size, cfg.tokens
-        if cfg.pixels % T:
-            raise ValueError(f"tokens={T} must divide pixels={cfg.pixels}")
-        self.patch = cfg.pixels // T
-        self.stem = nn.Linear(self.patch, d)
+        d = cfg.hidden_size
+        self.trigram = cfg.input_mode == "trigram"
+        if self.trigram:
+            # byte_emb x3 stem: T is set by the trigram form, not cfg.tokens.
+            # NOTE: the blocks are per-token MLPs (no cross-token mixing), so
+            # spatial aggregation lives entirely in the flatten readout — the
+            # aleph read still operates per pixel-trigram, exactly as it does
+            # per token in the AlephLM.
+            self.stem = TrigramStem(d, cfg.channels, cfg.pixels, cfg.n_bins)
+            T = self.stem.n_tokens
+        else:
+            T = cfg.tokens
+            if cfg.pixels % T:
+                raise ValueError(f"tokens={T} must divide pixels={cfg.pixels}")
+            self.patch = cfg.pixels // T
+            self.stem = nn.Linear(self.patch, d)
+        self.n_tokens = T
         self.blocks = nn.ModuleList([LinearBlock(d)
                                      for _ in range(cfg.n_blocks)])
         self.norm = nn.LayerNorm(d)
@@ -108,8 +180,11 @@ class TinyTrunk(nn.Module):
             if input_ids is None:
                 raise ValueError("TinyTrunk needs x or input_ids")
             x = self._from_ids(input_ids)
-        x = x.reshape(x.shape[0], self.config.tokens, self.patch)
-        h = self.stem(x)
+        if self.trigram:
+            h = self.stem(x)                       # (B, T, d) byte_emb x3
+        else:
+            x = x.reshape(x.shape[0], self.config.tokens, self.patch)
+            h = self.stem(x)
         for blk in self.blocks:
             out = blk(h)
             h = out[0] if isinstance(out, tuple) else out
@@ -156,9 +231,10 @@ class TinyTrunk(nn.Module):
 
 
 def build_trunk(d: int = 64, n_blocks: int = 4, tokens: int = 1,
-                seed: int = 0, pixels: int = 784,
-                n_classes: int = 10) -> TinyTrunk:
+                seed: int = 0, pixels: int = 784, n_classes: int = 10,
+                channels: int = 1, input_mode: str = "linear") -> TinyTrunk:
     torch.manual_seed(seed)
     return TinyTrunk(TinyConfig(hidden_size=d, n_blocks=n_blocks,
                                 tokens=tokens, pixels=pixels,
-                                n_classes=n_classes))
+                                n_classes=n_classes, channels=channels,
+                                input_mode=input_mode))

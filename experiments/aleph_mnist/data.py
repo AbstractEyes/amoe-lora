@@ -39,6 +39,7 @@ CIFAR_HF_REPO = "uoft-cs/cifar10"   # canonical, parquet on HF's CDN (fast)
 
 DATASET_PIXELS = {"mnist": 784, "fashion": 784, "cifar10": 3072}
 DATASET_CLASSES = {"mnist": 10, "fashion": 10, "cifar10": 10}
+DATASET_CHANNELS = {"mnist": 1, "fashion": 1, "cifar10": 3}  # trigram order
 _CROSS = {"mnist": "fashion", "fashion": "mnist"}   # same-dim real domain
 
 
@@ -50,6 +51,7 @@ class Bed:
     yte: torch.Tensor
     neutral: dict[str, torch.Tensor]
     name: str
+    channels: int = 1          # 3 for RGB — the trigram order for this bed
 
     @property
     def pixels(self) -> int:
@@ -63,7 +65,7 @@ class Bed:
         return Bed(self.xtr.to(device), self.ytr.to(device),
                    self.xte.to(device), self.yte.to(device),
                    {k: v.to(device) for k, v in self.neutral.items()},
-                   self.name)
+                   self.name, self.channels)
 
     def batches(self, batch: int, steps: int, seed: int = 0):
         """Deterministic with-replacement sampling — same discipline as
@@ -211,4 +213,5 @@ def build_bed(dataset: str = "mnist", train_n: int | None = None,
         except Exception as e:                            # offline is not fatal
             print(f"[data] cross-domain neutral '{cross}' unavailable "
                   f"({e}); continuing with permuted + noise")
-    return Bed(xtr, ytr, xte, yte, neutral, name)
+    channels = 1 if synthetic else DATASET_CHANNELS[dataset]
+    return Bed(xtr, ytr, xte, yte, neutral, name, channels)

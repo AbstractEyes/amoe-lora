@@ -153,7 +153,34 @@ destroyed — that gap is the sharpest thing this bed can show, and it
 bears directly on whether co-trained aleph artifacts can be shipped as
 detachable adapters at all.
 
-### Result so far (seed 0, d=64, MNIST) — Fork 2, provisionally
+### Input structure: the trigram rule (why the linear climb tied)
+
+The single-linear stem feeds the aleph a **unigram** — one value per position,
+nothing three-way to bind — and the address's advantage (L-AR5: byte_emb×3
+*differentially* benefits the addressed head) cannot appear on a unigram. That,
+not "the aleph is inert on vision," is why the linear-stem climb tied
+`soft == none` across every dataset and width. The campaign rule is discovery
+#16: **channel count = n-gram order**, and *byte-trigram-as-RGB engaged first
+try*.
+
+`input_mode="trigram"` (CLI `--trigram`, notebook `TRIGRAM=True`) swaps in the
+byte_emb×3 stem — the canonical AlephLM input — in two forms:
+
+- **channel** (RGB, e.g. cifar): each pixel is a natural byte-trigram (R,G,B);
+  embed each channel with its own table and sum. `T = H·W` tokens.
+- **spatial** (grayscale mnist/fashion): no channel trigram, so form the
+  sequence one — `emb0(px_t) + emb1(px_{t-1}) + emb2(px_{t-2})`, past-only —
+  the exact AlephLM form with pixels as the bytes. `T = pixels`.
+
+Pixels are quantized to byte levels; the per-token blocks stay per-token (no
+cross-token mixing), so the flatten readout does the spatial aggregation and the
+aleph reads each pixel-trigram exactly as it reads each token in the LM. **This
+is the real test of whether the address manifests on pixels** — and it pairs
+with law 2 (the address must parameterize the output): if trigram *input* alone
+still ties, the objective is the remaining lever (a next-pixel-byte / trigram-
+reconstruction head, where the address parameterizes the prediction).
+
+### Result so far (seed 0, d=64, MNIST) — the linear-stem climb (unigram input)
 
 The QUICK pass landed on **the tie**: `Δ(soft − none)` never crosses zero
 (−0.00016 / −0.00055 / −0.00026 / +0.00008 CE across the dial; sign

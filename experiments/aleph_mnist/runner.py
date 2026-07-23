@@ -66,6 +66,7 @@ class RunConfig:
     lr_head: float = 1e-3
     lr_trunk: float = 1e-4
     codebook_init: str = "random"   # random | fibonacci
+    input_mode: str = "linear"      # linear | trigram (byte_emb x3)
     # bookkeeping
     probe_every: int = 250
     log_every: int = 250
@@ -84,8 +85,9 @@ def pretrain(cfg: RunConfig, bed: Bed) -> dict:
     dial compares arms, not initializations."""
     laws.pin_precision()
     trunk = build_trunk(cfg.d, cfg.n_blocks, cfg.tokens, seed=cfg.seed,
-                        pixels=bed.pixels,
-                        n_classes=bed.n_classes).to(cfg.device)
+                        pixels=bed.pixels, n_classes=bed.n_classes,
+                        channels=bed.channels,
+                        input_mode=cfg.input_mode).to(cfg.device)
     if cfg.pretrain_steps == 0:
         return {k: v.cpu().clone() for k, v in trunk.state_dict().items()}
     trunk.set_trainable_blocks(cfg.n_blocks)
@@ -112,8 +114,9 @@ def run(cfg: RunConfig, bed: Bed, base_state: dict | None = None) -> dict:
     laws.pin_precision()
     torch.manual_seed(cfg.seed)
     trunk = build_trunk(cfg.d, cfg.n_blocks, cfg.tokens, seed=cfg.seed,
-                        pixels=bed.pixels,
-                        n_classes=bed.n_classes).to(cfg.device)
+                        pixels=bed.pixels, n_classes=bed.n_classes,
+                        channels=bed.channels,
+                        input_mode=cfg.input_mode).to(cfg.device)
     if base_state is not None:
         trunk.load_state_dict({k: v.to(cfg.device)
                                for k, v in base_state.items()})
@@ -394,6 +397,9 @@ def main(argv=None) -> None:
     p.add_argument("--arms", nargs="+", default=list(ARMS))
     p.add_argument("--dial", type=int, nargs="+", default=list(DIAL))
     p.add_argument("--codebook-init", default="random")
+    p.add_argument("--trigram", action="store_true",
+                   help="byte_emb x3 input (discovery #16: channel=n-gram "
+                        "order) instead of the single-linear unigram stem")
     p.add_argument("--big", action="store_true",
                    help="run the substrate-climb grid (workstation workout)")
     p.add_argument("--dims", type=int, nargs="+", default=list(DIMS_CLIMB))
@@ -418,7 +424,8 @@ def main(argv=None) -> None:
 
     base = RunConfig(steps=steps, pretrain_steps=pre, train_n=train_n,
                      batch=batch, dataset=args.dataset,
-                     codebook_init=args.codebook_init)
+                     codebook_init=args.codebook_init,
+                     input_mode="trigram" if args.trigram else "linear")
     if big:
         grid(datasets=tuple(args.datasets), dims=tuple(args.dims),
              seeds=seeds, base=base, include_scratch=args.scratch)
