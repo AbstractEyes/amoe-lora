@@ -12,3 +12,7 @@ venv/
 # adapter weights never live in the code repo — they ship on the hub
 *.pt
 *.safetensors
+
+# experiment run outputs (ledgers are shipped with the write-up, not the code)
+experiments/results/
+experiments/**/data/
