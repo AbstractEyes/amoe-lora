@@ -211,12 +211,22 @@ an overrun fails loud, never silently spills). These trunks are tiny
 the workout is sustained utilization across the ~450-cell climb on full
 data. To actually stress VRAM, push `--batch 8192` and/or `--dims 2048`.
 
-**CIFAR-10 mirror.** torchvision's default host (cs.toronto.edu) is slow.
-The grid runs cifar **last** and **skips it** if the download fails, so
-mnist+fashion complete regardless. To include it: drop
-`cifar-10-python.tar.gz` into the data root from any fast source (md5 is
-checked, so it's reused), or set `AMOE_CIFAR_URL` to a faster host of that
-exact tar.
+**CIFAR-10 from Hugging Face (default).** torchvision's default host
+(cs.toronto.edu) is slow, so CIFAR loads from the
+[`uoft-cs/cifar10`](https://huggingface.co/datasets/uoft-cs/cifar10)
+parquet over HF's CDN instead — ~37 s for the full 50k/10k here vs a
+2-minute mirror timeout. Knobs (env):
+
+- `AMOE_CIFAR_HF_REPO` — point at a different HF repo (e.g. your own
+  mirror namespace) instead of `uoft-cs/cifar10`.
+- `AMOE_CIFAR_SOURCE=torchvision` — force the old tar path.
+- `AMOE_CIFAR_URL` — a faster host of `cifar-10-python.tar.gz` for the
+  torchvision path (implies `torchvision`).
+
+HF needs the `datasets` library (present on Colab; `pip install datasets`
+otherwise); if it's missing or offline, the loader falls back to
+torchvision automatically. The grid still runs cifar **last** and skips it
+only if *both* sources fail, so mnist+fashion always complete.
 
 Every cell appends a JSON row to a ledger (`results/ledger.jsonl` for a
 sweep, `results/grid.jsonl` for `--big`); `plots.figure_set(rows)` and

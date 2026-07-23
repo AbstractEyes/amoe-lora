@@ -35,6 +35,7 @@ MNIST_MEAN, MNIST_STD = 0.1307, 0.3081
 FASHION_MEAN, FASHION_STD = 0.2860, 0.3530
 CIFAR_MEAN = (0.4914, 0.4822, 0.4465)
 CIFAR_STD = (0.2470, 0.2435, 0.2616)
+CIFAR_HF_REPO = "uoft-cs/cifar10"   # canonical, parquet on HF's CDN (fast)
 
 DATASET_PIXELS = {"mnist": 784, "fashion": 784, "cifar10": 3072}
 DATASET_CLASSES = {"mnist": 10, "fashion": 10, "cifar10": 10}
@@ -77,8 +78,67 @@ class Bed:
 
 
 # ---------------------------------------------------------------- loaders
+def _cifar_norm(arr) -> torch.Tensor:
+    """(N,32,32,3) uint8 ndarray -> (N,3072) per-channel-normalized, flat,
+    channel-major. Shared by the HF and torchvision CIFAR paths so both
+    produce byte-identical tensors."""
+    m = torch.tensor(CIFAR_MEAN).view(1, 3, 1, 1)
+    s = torch.tensor(CIFAR_STD).view(1, 3, 1, 1)
+    x = torch.from_numpy(arr).float().div(255.0)      # (N,32,32,3)
+    x = (x.permute(0, 3, 1, 2) - m) / s               # (N,3,32,32)
+    return x.reshape(arr.shape[0], -1)
+
+
+def _load_cifar10(root: str):
+    """CIFAR-10, HF-first. torchvision's default mirror (cs.toronto.edu) is
+    slow; this pulls the parquet from a Hugging Face dataset repo over HF's
+    CDN instead. Precedence:
+      AMOE_CIFAR_URL set  -> torchvision with that mirror (skips HF)
+      AMOE_CIFAR_SOURCE   -> 'hf' (default) or 'torchvision'
+      AMOE_CIFAR_HF_REPO  -> override the HF repo (default uoft-cs/cifar10;
+                             point it at your own mirror namespace if you
+                             prefer to own the copy)
+    HF failure (offline / no `datasets`) falls back to torchvision, so a
+    run never hard-stops on the data source."""
+    import numpy as np
+
+    force_tv = bool(os.environ.get("AMOE_CIFAR_URL"))
+    source = ("torchvision" if force_tv
+              else os.environ.get("AMOE_CIFAR_SOURCE", "hf"))
+
+    if source == "hf":
+        try:
+            from datasets import load_dataset
+            repo = os.environ.get("AMOE_CIFAR_HF_REPO", CIFAR_HF_REPO)
+            dd = load_dataset(repo, cache_dir=root)   # img (PIL), label (int)
+
+            def flat(split):
+                arr = np.stack([np.asarray(im) for im in split["img"]])
+                return _cifar_norm(arr), torch.tensor(split["label"]).long()
+            xtr, ytr = flat(dd["train"])
+            xte, yte = flat(dd["test"])
+            print(f"[data] cifar10 <- HF {repo} "
+                  f"(train {xtr.shape[0]}, test {xte.shape[0]})", flush=True)
+            return xtr, ytr, xte, yte
+        except Exception as e:
+            print(f"[data] HF cifar10 load failed ({e}); falling back to "
+                  "the torchvision mirror", flush=True)
+
+    from torchvision import datasets
+    cls = datasets.CIFAR10
+    url = os.environ.get("AMOE_CIFAR_URL")
+    if url:                                           # a faster host of the tar
+        cls.url = url
+    tr = cls(root=root, train=True, download=True)
+    te = cls(root=root, train=False, download=True)
+    return (_cifar_norm(tr.data), torch.tensor(tr.targets).long(),
+            _cifar_norm(te.data), torch.tensor(te.targets).long())
+
+
 def _load(dataset: str, root: str):
     """Return (xtr, ytr, xte, yte): normalized, flattened, on CPU."""
+    if dataset == "cifar10":
+        return _load_cifar10(root)
     try:
         from torchvision import datasets
     except ImportError as e:                       # pragma: no cover
@@ -92,22 +152,6 @@ def _load(dataset: str, root: str):
         def flat(ds):
             x = ds.data.float().div(255.0).sub(mean).div(std)
             return x.reshape(x.shape[0], -1), ds.targets.long()
-    elif dataset == "cifar10":
-        cls = datasets.CIFAR10
-        # The default torchvision mirror (cs.toronto.edu) is slow. Two
-        # escapes: (1) drop cifar-10-python.tar.gz into `root` from any
-        # fast source — torchvision md5-checks it and skips the download;
-        # (2) set AMOE_CIFAR_URL to a faster host of that exact tar.
-        url = os.environ.get("AMOE_CIFAR_URL")
-        if url:
-            cls.url = url
-        m = torch.tensor(CIFAR_MEAN).view(1, 3, 1, 1)
-        s = torch.tensor(CIFAR_STD).view(1, 3, 1, 1)
-
-        def flat(ds):
-            x = torch.from_numpy(ds.data).float().div(255.0)  # (N,32,32,3)
-            x = (x.permute(0, 3, 1, 2) - m) / s               # (N,3,32,32)
-            return x.reshape(x.shape[0], -1), torch.tensor(ds.targets).long()
     else:
         raise ValueError(f"unknown dataset {dataset!r}")
     tr = cls(root=root, train=True, download=True)

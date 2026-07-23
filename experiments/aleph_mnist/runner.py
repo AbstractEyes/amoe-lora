@@ -343,7 +343,8 @@ def grid(datasets=DATASETS, dims=DIMS_CLIMB, seeds=(0, 1, 2),
             # sink an overnight run — the earlier datasets are already in
             # the ledger. Skip and move on.
             print(f"[grid] SKIP {dataset} — could not build bed ({e}). "
-                  "Drop the tar into root or set AMOE_CIFAR_URL; rerun with "
+                  "cifar10 loads from HF by default (needs `datasets`); set "
+                  "AMOE_CIFAR_HF_REPO/SOURCE/URL or rerun with "
                   f"--datasets {dataset} to fill it in.", flush=True)
             continue
         assert bed.pixels == DATASET_PIXELS[dataset], "pixel-count mismatch"
