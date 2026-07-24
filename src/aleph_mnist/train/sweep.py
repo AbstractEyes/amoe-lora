@@ -51,15 +51,45 @@ def sweep(seeds=(0, 1), dial=DIAL, arms=ARMS, base: RunConfig | None = None,
                       f"acc={row['final']['acc']:.4f} "
                       f"dCE={row['delta_vs_base_ce']:+.4f}", flush=True)
         if include_scratch:
-            for m in tuple(arms) + ("off",):
-                cfg = replace(base, mode=m, seed=seed,
-                              trainable_blocks=base.n_blocks,
-                              pretrain_steps=0, tag="scratch")
-                row = run(cfg, bed, None)
-                append_ledger(row, ledger)
-                rows.append(row)
-                print(f"  -> {cfg.cell}: ce={row['final']['ce']:.4f} "
-                      f"acc={row['final']['acc']:.4f}", flush=True)
+            rows += scratch(seeds=(seed,), arms=arms, base=base, bed=bed,
+                            ledger=ledger)
+    return rows
+
+
+def scratch(seeds=(0,), arms=ARMS, base: RunConfig | None = None,
+            bed: Bed | None = None, ledger: str | None = None,
+            steps: int | None = None) -> list[dict]:
+    """The from-scratch co-training rows ONLY — no phase-0 pretrain, trunk
+    and head move together from step 0. This is the co-training question in
+    its most literal form, and it is the one to re-run on its own when the
+    pretrained dial is already banked.
+
+    THE BUDGET MATTERS. A pretrained dial cell's trunk saw
+    `pretrain_steps + steps` of training (phase-0 solo, then co-trained); a
+    scratch cell that runs only `base.steps` from random init is undertrained
+    by exactly `pretrain_steps` and loses the comparison on compute, not on
+    the address. So the fair default is `pretrain_steps + steps` — pass
+    `steps=` to override.
+    """
+    base = base or RunConfig()
+    dev = resolve_device(base.device)
+    if bed is None:
+        bed = build_bed(base.dataset, base.train_n, seed=base.seed,
+                        root=base.root, synthetic=base.synthetic).to(dev)
+    steps = steps if steps is not None else base.pretrain_steps + base.steps
+    ledger = ledger or ledger_path()
+    rows = []
+    for seed in seeds:
+        for m in tuple(arms) + ("off",):
+            cfg = replace(base, mode=m, seed=seed,
+                          trainable_blocks=base.n_blocks, pretrain_steps=0,
+                          steps=steps, tag="scratch")
+            row = run(cfg, bed, None)
+            append_ledger(row, ledger)
+            rows.append(row)
+            print(f"  -> {cfg.cell}: ce={row['final']['ce']:.4f} "
+                  f"acc={row['final']['acc']:.4f} "
+                  f"(scratch, {steps} steps)", flush=True)
     return rows
 
 

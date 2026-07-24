@@ -15,7 +15,7 @@ injects, so calling `main([])` from a cell never raises SystemExit.
 """
 from __future__ import annotations
 
-from .api import publish, run_climb, run_sweep, smoke
+from .api import publish, run_climb, run_scratch, run_sweep, smoke
 from .config import RunConfig
 from .train import ARMS, DATASETS, DEFAULT_REPO, DIAL, DIMS_CLIMB
 
@@ -60,6 +60,10 @@ def build_parser():
     p.add_argument("--dims", type=int, nargs="+", default=list(DIMS_CLIMB))
     p.add_argument("--scratch", action="store_true",
                    help="also run the from-scratch co-training rows")
+    p.add_argument("--scratch-only", action="store_true",
+                   help="run ONLY the from-scratch rows (fair budget), no dial")
+    p.add_argument("--scratch-steps", type=int, default=None,
+                   help="steps per scratch cell (default pretrain_steps+steps)")
     # bookkeeping
     p.add_argument("--device", default=d.device or None)
     p.add_argument("--out", default=None,
@@ -104,7 +108,10 @@ def main(argv=None) -> None:
                     codebook_init=args.codebook_init,
                     input_mode=input_mode, patch_size=args.patch_size,
                     num_heads=args.num_heads, device=args.device or "")
-    if big:
+    if args.scratch_only:
+        run_scratch(cfg, seeds=seeds, arms=tuple(args.arms), out=args.out,
+                    steps=args.scratch_steps)
+    elif big:
         run_climb(cfg, datasets=tuple(args.datasets), dims=tuple(args.dims),
                   seeds=seeds, out=args.out, include_scratch=args.scratch)
     else:

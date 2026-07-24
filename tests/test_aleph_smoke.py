@@ -401,6 +401,57 @@ def test_save_anchor_without_artifact_raises():
         save_anchor({"config": {}}, "unused.pt")
 
 
+# ────────────────────────────── scratch budget ────────────────────────────
+def test_scratch_uses_fair_budget(tmp_path, monkeypatch):
+    """A scratch cell trains for pretrain_steps + steps by default — the same
+    total the pretrained dial's trunk saw — so it loses (if it loses) on the
+    address, not on compute. `run` is stubbed so no training happens."""
+    import importlib
+    from dataclasses import asdict
+
+    S = importlib.import_module("aleph_mnist.train.sweep")   # the module,
+    seen = []                                               # not the fn it exports
+
+    def fake_run(cfg, bed, base_state):
+        seen.append(cfg)
+        return {"config": asdict(cfg), "cell": cfg.cell, "traj": [],
+                "final": {"ce": 0.0, "acc": 0.0}, "delta_vs_base_ce": 0.0}
+
+    monkeypatch.setattr(S, "run", fake_run)
+    bed = _bed(64, 1, None, n=16)
+    base = RunConfig(steps=30, pretrain_steps=70, synthetic=True)
+    S.scratch(seeds=(0,), arms=("soft",), base=base, bed=bed,
+              ledger=str(tmp_path / "s.jsonl"))
+    assert seen and len(seen) == 2                    # soft + off
+    for c in seen:
+        assert c.steps == 100                         # 70 + 30, the fair budget
+        assert c.pretrain_steps == 0 and c.tag == "scratch"
+        assert c.trainable_blocks == base.n_blocks    # full co-training
+
+
+def test_scratch_steps_override(tmp_path, monkeypatch):
+    import importlib
+    from dataclasses import asdict
+
+    S = importlib.import_module("aleph_mnist.train.sweep")
+    seen = []
+    monkeypatch.setattr(S, "run", lambda cfg, bed, bs: (
+        seen.append(cfg) or {"config": asdict(cfg), "cell": cfg.cell,
+                             "traj": [], "final": {"ce": 0.0, "acc": 0.0},
+                             "delta_vs_base_ce": 0.0}))
+    S.scratch(seeds=(0,), arms=("soft",), base=RunConfig(synthetic=True),
+              bed=_bed(64, 1, None, n=16), ledger=str(tmp_path / "s.jsonl"),
+              steps=7)
+    assert all(c.steps == 7 for c in seen)
+
+
+def test_cli_scratch_only_flags():
+    from aleph_mnist.cli import build_parser
+    args, _ = build_parser().parse_known_args(
+        ["--patch", "--scratch-only", "--scratch-steps", "1200"])
+    assert args.scratch_only is True and args.scratch_steps == 1200
+
+
 # ─────────────────────────────── publish ──────────────────────────────────
 def test_publish_dry_run_stages_evidence(tmp_path):
     """publish(dry_run=True) assembles the run folder — ledger, config,

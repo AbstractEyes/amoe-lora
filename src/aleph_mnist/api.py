@@ -17,6 +17,7 @@ from .data import Bed, build_bed
 from .train import ARMS, DATASETS, DEFAULT_REPO, DIAL, DIMS_CLIMB
 from .train import grid as _grid
 from .train import publish as _publish
+from .train import scratch as _scratch
 from .train import smoke as _smoke
 from .train import sweep as _sweep
 
@@ -45,6 +46,24 @@ def run_climb(cfg: RunConfig | None = None, *, datasets=DATASETS,
     return _grid(datasets=datasets, dims=dims, seeds=seeds,
                  base=cfg or RunConfig(), ledger=out,
                  include_scratch=include_scratch)
+
+
+def run_scratch(cfg: RunConfig | None = None, *, seeds=(0,), arms=ARMS,
+                out: str | None = None, steps: int | None = None,
+                bed: Bed | None = None) -> list[dict]:
+    """ONLY the from-scratch co-training rows — trunk and head move together
+    from step 0, no phase-0 pretrain. Re-run these on their own without
+    redoing the pretrained dial.
+
+    By default each cell trains for `pretrain_steps + steps` (the same total
+    the pretrained dial's trunk saw) — pass `steps=` to override. This is the
+    fix for scratch cells losing on compute rather than on the address.
+
+        run_scratch(RunConfig(dataset="mnist", input_mode="patch",
+                              steps=400, pretrain_steps=600))   # 1000 steps
+    """
+    return _scratch(seeds=seeds, arms=arms, base=cfg or RunConfig(), bed=bed,
+                    ledger=out, steps=steps)
 
 
 def smoke(device: str | None = None, out: str | None = None) -> list[dict]:
