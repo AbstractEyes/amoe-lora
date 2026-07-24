@@ -178,4 +178,13 @@ def smoke(device: str | None = None, ledger: str | None = None) -> list[dict]:
                       mode="soft", trainable_blocks=4, tag="patch"), pb, None)
     append_ledger(row, ledger)
     rows.append(row)
+    # addressed-conv bed: soft (aleph read) + none (uniform = plain conv)
+    from .conv_bed import run_conv
+    cb = build_bed(train_n=128, synthetic=True, pixels=64, channels=1).to(device)
+    for m in ("soft", "none"):
+        row = run_conv(replace(base, input_mode="addr_conv", mode=m, k_bank=8,
+                               k_addr=8, conv_channels=8, conv_layers=2,
+                               tag="conv"), cb, None)
+        append_ledger(row, ledger)
+        rows.append(row)
     return rows

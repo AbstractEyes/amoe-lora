@@ -15,9 +15,9 @@ injects, so calling `main([])` from a cell never raises SystemExit.
 """
 from __future__ import annotations
 
-from .api import publish, run_climb, run_scratch, run_sweep, smoke
+from .api import publish, run_climb, run_conv, run_scratch, run_sweep, smoke
 from .config import RunConfig
-from .train import ARMS, DATASETS, DEFAULT_REPO, DIAL, DIMS_CLIMB
+from .train import ARMS, CONV_ARMS, DATASETS, DEFAULT_REPO, DIAL, DIMS_CLIMB
 
 
 def build_parser():
@@ -38,6 +38,13 @@ def build_parser():
                    help="patch mode: the aleph-routed ViT (the real bed)")
     p.add_argument("--patch-size", type=int, default=d.patch_size)
     p.add_argument("--num-heads", type=int, default=d.num_heads)
+    p.add_argument("--conv", action="store_true",
+                   help="addressed-conv bed: match/defeat a plain conv2d")
+    p.add_argument("--k-bank", type=int, default=d.k_bank)
+    p.add_argument("--conv-channels", type=int, default=d.conv_channels)
+    p.add_argument("--conv-layers", type=int, default=d.conv_layers)
+    p.add_argument("--generate", action="store_true",
+                   help="conv bed: masked-pixel reconstruction (bpb), not classify")
     p.add_argument("--trigram", action="store_true",
                    help="byte_emb x3 input (discovery #16: channel = n-gram "
                         "order) instead of the single-linear unigram stem")
@@ -82,6 +89,27 @@ def main(argv=None) -> None:
     args, _ = build_parser().parse_known_args(argv)
     if args.smoke:
         smoke(device=args.device, out=args.out)   # None -> CUDA when present
+        return
+
+    if args.conv:                      # the addressed-conv head-to-head
+        steps = args.steps if args.steps is not None else 1500
+        train_n = (None if (args.train_n is not None and args.train_n <= 0)
+                   else args.train_n)
+        conv_cfg = RunConfig(
+            dataset=args.dataset, train_n=train_n,
+            batch=args.batch or 128, root=args.root, steps=steps,
+            probe_every=250, log_every=250,
+            input_mode="addr_conv", objective="generate" if args.generate
+            else "classify", k_bank=args.k_bank,
+            conv_channels=args.conv_channels, conv_layers=args.conv_layers,
+            device=args.device or "")
+        arms = tuple(args.arms) if args.arms != list(ARMS) else CONV_ARMS
+        seeds = tuple(args.seeds) if args.seeds else (0,)
+        rows = run_conv(conv_cfg, seeds=seeds, arms=arms, out=args.out)
+        if args.publish:
+            import os
+            publish(args.repo, results_dir=os.path.dirname(args.out)
+                    if args.out else None, private=not args.public)
         return
 
     big = args.big

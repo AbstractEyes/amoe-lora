@@ -47,13 +47,25 @@ class RunConfig:
     lr_head: float = 1e-3
     lr_trunk: float = 1e-4
     codebook_init: str = "random"   # random | fibonacci
-    input_mode: str = "linear"      # linear | trigram (byte_emb x3) | patch
+    input_mode: str = "linear"      # linear | trigram | patch | addr_conv
     # patch mode: a 2D-patch ViT whose token mixer is the aleph router (not
     # softmax). This is the substrate the architecture requires — the
     # linear/trigram trunks do no cross-token mixing, so they are additive
     # models and the adapter reads a stream that was never mixed.
     patch_size: int = 4             # P: a token is one C x P x P image region
     num_heads: int = 4             # routed-attention heads; must divide d
+    # addressed-conv mode (input_mode="addr_conv"): a CNN whose per-position
+    # conv kernel is composed from a filter bank by the aleph read. The `mode`
+    # field above is the ADDRESS mode (soft|sign|none|learned|off), not an amoe
+    # arm. This bed has no adapter — the arm ladder lives inside AddressedConv2d.
+    k_bank: int = 16                # conv filter branches (the cost)
+    k_addr: int = 16               # codebook atoms on S^3 (multiple of k_bank)
+    kernel_size: int = 3            # conv kernel (odd, for 'same' padding)
+    conv_channels: int = 32         # base width; block i has conv_channels*2^i
+    conv_layers: int = 2            # addressed-conv blocks
+    n_slots: int = 4                # address slots read per position
+    objective: str = "classify"     # classify | generate (masked-pixel recon)
+    n_bins: int = 16               # generative: byte levels per pixel
     # bookkeeping
     probe_every: int = 250
     log_every: int = 250

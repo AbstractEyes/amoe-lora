@@ -12,14 +12,17 @@ surface (`build_bed`, `build_model`, `build_heads`, `run`, `pretrain`,
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 from .config import RunConfig, resolve_device
 from .data import Bed, build_bed
-from .train import ARMS, DATASETS, DEFAULT_REPO, DIAL, DIMS_CLIMB
+from .train import ARMS, CONV_ARMS, DATASETS, DEFAULT_REPO, DIAL, DIMS_CLIMB
 from .train import grid as _grid
 from .train import publish as _publish
 from .train import scratch as _scratch
 from .train import smoke as _smoke
 from .train import sweep as _sweep
+from .train import sweep_conv as _sweep_conv
 
 
 def make_bed(cfg: RunConfig | None = None) -> Bed:
@@ -46,6 +49,21 @@ def run_climb(cfg: RunConfig | None = None, *, datasets=DATASETS,
     return _grid(datasets=datasets, dims=dims, seeds=seeds,
                  base=cfg or RunConfig(), ledger=out,
                  include_scratch=include_scratch)
+
+
+def run_conv(cfg: RunConfig | None = None, *, seeds=(0,), arms=CONV_ARMS,
+             out: str | None = None, bed: Bed | None = None) -> list[dict]:
+    """The addressed-conv head-to-head vs a plain conv. Arms are ADDRESS modes
+    (soft/sign/none/learned/off), not amoe anchors. `soft − none` isolates the
+    aleph; `off` is the lean plain-conv baseline; `learned` a non-aleph dynamic
+    conv. Set cfg.objective='generate' for the masked-recon (bpb) phase where
+    the address can be load-bearing.
+
+        run_conv(RunConfig(input_mode="addr_conv", dataset="mnist"))
+    """
+    cfg = cfg or RunConfig(input_mode="addr_conv")
+    return _sweep_conv(replace(cfg, input_mode="addr_conv"), seeds=seeds,
+                       arms=arms, bed=bed, ledger=out)
 
 
 def run_scratch(cfg: RunConfig | None = None, *, seeds=(0,), arms=ARMS,
