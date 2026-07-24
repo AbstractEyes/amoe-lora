@@ -36,6 +36,18 @@ from .trunk import TinyConfig, TinyTrunk
 READOUT_MAX = 1 << 20      # flattened readout width we refuse to allocate
 
 
+def trunk_identity(name_key: str | None) -> str:
+    """The strict-attach identity string.
+
+    `build_model` stamps this on the trunk's `_name_or_path` and
+    `save_anchor` writes the SAME string into the checkpoint's
+    `base_model_id`. It lives in one function precisely so the two cannot
+    disagree — when they did, `amoe.attach(strict=True)` rejected an anchor
+    against the very trunk that produced it.
+    """
+    return f"tiny-{name_key}-4block" if name_key else "tiny-synthetic-4block"
+
+
 def _trigram_tokens(pixels: int, channels: int) -> int:
     """T for the trigram stem: RGB -> one token per pixel (H*W); grayscale
     -> one token per raster position (pixels)."""
@@ -110,13 +122,19 @@ def build_model(bed: Bed, cfg, *, seed: int | None = None) -> TinyTrunk:
             "the flatten small at any d)")
 
     # 4. identity + per-dataset trigram window
-    key = bed.name_key
-    name_or_path = f"tiny-{key}-4block" if key else "tiny-synthetic-4block"
+    name_or_path = trunk_identity(bed.name_key)
     lo, hi = (spec.trigram_lo, spec.trigram_hi) if spec else (-3.0, 3.0)
 
     torch.manual_seed(getattr(cfg, "seed", 0) if seed is None else seed)
-    return TinyTrunk(TinyConfig(
+    trunk = TinyTrunk(TinyConfig(
         hidden_size=d, n_blocks=n_blocks, tokens=tokens, pixels=pixels,
         channels=channels, n_classes=n_classes, input_mode=input_mode,
         n_bins=n_bins, readout_dim=readout_dim, _name_or_path=name_or_path,
         trigram_lo=lo, trigram_hi=hi))
+    # THE MODEL FOLLOWS THE DATA. The bed is the thing this trunk must
+    # consume, so placing the trunk anywhere else is always a bug. Deriving
+    # the device here (instead of trusting a caller's `.to(...)`) removes
+    # the whole "index is on cuda:0, other tensors on cpu" class — which is
+    # exactly what an explicit `.to(cfg.device or 'cpu')` produced once
+    # `cfg.device` became lazily resolved (i.e. "" by default).
+    return trunk.to(bed.xtr.device)

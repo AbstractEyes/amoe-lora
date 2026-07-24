@@ -56,11 +56,17 @@ def save_anchor(row: dict, path: str) -> str:
     art = row.get("_artifact")
     if art is None:
         raise ValueError("this row has no adapter to save (mode='off'?)")
+    from ..model.build import trunk_identity
+
     cfg = row["config"]
-    key = row.get("name_key") or cfg["dataset"]
+    # Same rule build_model stamped on the trunk. A synthetic bed has
+    # name_key=None and identity "tiny-synthetic-4block" — falling back to
+    # cfg["dataset"] here would write "tiny-mnist-4block" and strict attach
+    # would reject the anchor against its own trunk.
+    key = row["name_key"] if "name_key" in row else cfg.get("dataset")
     meta = {"name": f"{cfg['dataset']}-{cfg['mode']}-d{cfg['d']}"
                     f"-dial{cfg['trainable_blocks']}",
-            "base_model_id": f"tiny-{key}-4block",
+            "base_model_id": trunk_identity(key),
             "d": cfg["d"], "n_layers": cfg["n_blocks"],
             "sites": art["sites"], "seed": cfg["seed"], "precision": "fp32",
             "address_mode": cfg["mode"],      # NOT a stock anchor if != soft

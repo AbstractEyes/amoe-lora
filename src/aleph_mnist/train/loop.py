@@ -32,7 +32,7 @@ import torch
 
 from amoe import laws
 
-from ..config import RunConfig, resolve_device
+from ..config import RunConfig
 from ..data import Bed
 from ..diagnostics import probes
 from ..model import anchor_state, build_heads, build_model
@@ -53,8 +53,7 @@ def pretrain(cfg: RunConfig, bed: Bed) -> dict:
     """Train the bare trunk. Shared by every cell at this seed so the dial
     compares arms, not initializations."""
     laws.pin_precision()
-    dev = resolve_device(cfg.device)
-    trunk = build_model(bed, cfg).to(dev)
+    trunk = build_model(bed, cfg)          # lands on the bed's device
     if cfg.pretrain_steps == 0:
         return {k: v.cpu().clone() for k, v in trunk.state_dict().items()}
     trunk.set_trainable_blocks(cfg.n_blocks)
@@ -79,9 +78,9 @@ def pretrain(cfg: RunConfig, bed: Bed) -> dict:
 # --------------------------------------------------------------- one cell
 def run(cfg: RunConfig, bed: Bed, base_state: dict | None = None) -> dict:
     laws.pin_precision()
-    dev = resolve_device(cfg.device)
     torch.manual_seed(cfg.seed)
-    trunk = build_model(bed, cfg).to(dev)
+    trunk = build_model(bed, cfg)          # lands on the bed's device
+    dev = bed.xtr.device                   # one source of truth for placement
     if base_state is not None:
         trunk.load_state_dict({k: v.to(dev) for k, v in base_state.items()})
     base_eval = probes.evaluate(trunk, bed.xte, bed.yte)
@@ -108,7 +107,7 @@ def run(cfg: RunConfig, bed: Bed, base_state: dict | None = None) -> dict:
         groups.append({"params": trunk_params, "lr": cfg.lr_trunk})
     opt = laws.make_optimizer(groups, cfg.lr_head)
 
-    row = {"config": asdict(cfg), "cell": cfg.cell, "device": dev,
+    row = {"config": asdict(cfg), "cell": cfg.cell, "device": str(dev),
            "name_key": bed.name_key, "bed": bed.name,
            "params": {**census,
                       "adapter": sum(p.numel() for h in heads
@@ -122,7 +121,7 @@ def run(cfg: RunConfig, bed: Bed, base_state: dict | None = None) -> dict:
         row["inertness_at_attach"] = probes.inertness(
             trunk, wrappers, bed.xte[:512])
 
-    cuda = dev.startswith("cuda") and torch.cuda.is_available()
+    cuda = dev.type == "cuda" and torch.cuda.is_available()
     if cuda:
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.synchronize()

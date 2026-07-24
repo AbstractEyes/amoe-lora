@@ -148,6 +148,18 @@ def test_trigram_token_counts():
     assert gray.n_tokens == 784 and gray.stem.kind == "spatial"
 
 
+def test_model_follows_bed_device():
+    """The trunk lands on the BED's device. Placing it anywhere else is
+    always a bug: on Colab `build_model(bed, cfg).to(cfg.device or 'cpu')`
+    sent the trunk to cpu (device is "" by default now) while the bed was on
+    cuda -> 'index is on cuda:0, other tensors on cpu'. Deriving placement
+    from the bed removes the whole class."""
+    bed = _bed(784, 1, None)
+    trunk = build_model(bed, RunConfig(d=16))
+    assert next(trunk.parameters()).device == bed.xtr.device
+    trunk(bed.xtr[:4])                    # no manual .to() anywhere
+
+
 def test_probe_shim_is_deterministic():
     """amoe's LM-shaped _probe calls model(input_ids=...); it must work on
     this vision trunk and be a pure function of the ids."""
@@ -225,6 +237,31 @@ def test_strict_attach_roundtrip(tmp_path, dataset):
         off = probes.evaluate(fresh, bed.xte, bed.yte)
     assert off["ce"] == pre["ce"], "adapters off must equal the base exactly"
     handle.detach(verify=True)                    # bit-exact or it raises
+
+
+def test_strict_attach_roundtrip_synthetic(tmp_path):
+    """A synthetic bed (name_key=None) must round-trip too. build_model and
+    save_anchor both derive the identity from trunk_identity(), so they
+    cannot disagree — they did once, and strict attach rejected an anchor
+    against the very trunk that produced it."""
+    import amoe
+    from dataclasses import asdict
+
+    from aleph_mnist import anchor_state, build_bed, save_anchor
+    from aleph_mnist.model.build import trunk_identity
+
+    cfg = RunConfig(d=16, synthetic=True, train_n=64)
+    bed = build_bed(train_n=64, synthetic=True, pixels=64)
+    trunk = build_model(bed, cfg)
+    assert trunk.config._name_or_path == trunk_identity(None)
+
+    heads, sites, _ = build_heads(trunk, mode="soft", seed=0)
+    row = {"config": asdict(cfg), "name_key": bed.name_key,
+           "_artifact": {"state": anchor_state(heads, sites), "sites": sites}}
+    path = str(tmp_path / "syn.anchor.pt")
+    save_anchor(row, path)
+    amoe.attach(build_model(bed, cfg), path,
+                binding="blocks", strict=True).detach(verify=True)
 
 
 # ─────────────────────────── CLI and ledger ───────────────────────────────
