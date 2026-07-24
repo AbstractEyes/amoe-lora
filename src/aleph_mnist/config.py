@@ -47,7 +47,8 @@ class RunConfig:
     lr_head: float = 1e-3
     lr_trunk: float = 1e-4
     codebook_init: str = "random"   # random | fibonacci
-    input_mode: str = "linear"      # linear|trigram|patch|addr_conv|conv_tokens
+    input_mode: str = "linear"      # linear|trigram|patch|addr_conv|
+    #                                 conv_tokens|antipode_conv
     # patch mode: a 2D-patch ViT whose token mixer is the aleph router (not
     # softmax). This is the substrate the architecture requires — the
     # linear/trigram trunks do no cross-token mixing, so they are additive

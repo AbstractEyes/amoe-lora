@@ -20,7 +20,8 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from aleph_mnist.model.antipode_conv import (              # noqa: E402
-    AntipodeRead, ConvTokenConfig, ConvTokenTrunk, SignedSquare)
+    AntipodeConv2d, AntipodeConvTrunk, AntipodeRead, ConvTokenConfig,
+    ConvTokenTrunk, SignedSquare, signed_antipode_read)
 
 
 def _read(mode, d=32, k_addr=64, n_slots=16):
@@ -141,3 +142,57 @@ def test_off_arm_has_no_read():
                           conv_layers=2, read_layers=2)
     t = ConvTokenTrunk(cfg)
     assert t.read_report(torch.randn(2, 784))["read_amp_mean"] == 0.0
+
+
+# ═══════════ AntipodeConv2d: the ENTIRE conv IS the antipode read ══════════
+def test_antipode_conv_read_is_odd():
+    c = AntipodeConv2d(4, 8, kernel=3, mode="soft").eval()
+    x = torch.randn(2, 4, 10, 10)
+    s = c.query(x)
+    B, _, H, W = s.shape
+    sl = s.view(B, c.n_slots, c.d_addr, H, W).permute(0, 1, 3, 4, 2)
+    r = signed_antipode_read(sl, c.addr.codebook, c.tau, "soft")
+    rn = signed_antipode_read(-sl, c.addr.codebook, c.tau, "soft")
+    assert torch.allclose(r, -rn, atol=1e-6)
+
+
+def test_off_is_linear_soft_is_not():
+    """off = out(query(x)) is a pure LINEAR conv (the plain-conv control);
+    soft is NONLINEAR because the antipode read is the sole nonlinearity."""
+    x1, x2 = torch.randn(2, 4, 9, 9), torch.randn(2, 4, 9, 9)
+    off = AntipodeConv2d(4, 8, mode="off").eval()
+    assert torch.allclose(off(2 * x1 + 3 * x2), 2 * off(x1) + 3 * off(x2),
+                          atol=1e-5)
+    soft = AntipodeConv2d(4, 8, mode="soft").eval()
+    assert not torch.allclose(soft(2 * x1 + 3 * x2),
+                              2 * soft(x1) + 3 * soft(x2), atol=1e-3)
+
+
+def test_antipode_is_the_only_nonlinearity():
+    """No ReLU/GELU/SiLU/SquaredReLU anywhere in the trunk — the antipode read
+    is the ENTIRE conv's sole nonlinear operation. This is the whole claim."""
+    import torch.nn as nn
+
+    from aleph_mnist.model.trunk import SquaredReLU
+    t = AntipodeConvTrunk(ConvTokenConfig(channels=1, height=28, width=28,
+                          mode="soft", d=16, conv_layers=2, n_slots=8))
+    banned = (nn.ReLU, nn.GELU, nn.SiLU, nn.ELU, nn.Tanh, SquaredReLU)
+    assert not [m for m in t.modules() if isinstance(m, banned)]
+
+
+def test_antipode_conv_arms_param_matched():
+    n = {m: sum(p.numel() for p in AntipodeConv2d(4, 8, mode=m).parameters())
+         for m in ("soft", "mag", "none")}
+    assert n["soft"] == n["mag"] == n["none"], n
+
+
+@pytest.mark.parametrize("objective,shape", [
+    ("classify", (3, 10)), ("generate", (3, 16, 28, 28))])
+def test_antipode_conv_trunk_shapes(objective, shape):
+    cfg = ConvTokenConfig(channels=1, height=28, width=28, mode="soft", d=16,
+                          conv_layers=2, n_slots=8, objective=objective,
+                          n_bins=16)
+    t = AntipodeConvTrunk(cfg)
+    out = t(torch.randn(3, 784))
+    assert out.logits.shape == shape
+    assert t.read_report(torch.randn(3, 784))["read_amp_mean"] > 0.0

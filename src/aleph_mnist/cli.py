@@ -43,6 +43,9 @@ def build_parser():
     p.add_argument("--conv-tokens", action="store_true",
                    help="conv bed variant: conv stem + per-token SIGNED antipode "
                         "read (the load-bearing one); default is filter-steering")
+    p.add_argument("--antipode-conv", action="store_true",
+                   help="conv bed variant: the ENTIRE conv IS the antipode read "
+                        "(no plain filter, no ReLU — the read is the operation)")
     p.add_argument("--k-bank", type=int, default=d.k_bank)
     p.add_argument("--conv-channels", type=int, default=d.conv_channels)
     p.add_argument("--conv-layers", type=int, default=d.conv_layers)
@@ -94,11 +97,12 @@ def main(argv=None) -> None:
         smoke(device=args.device, out=args.out)   # None -> CUDA when present
         return
 
-    if args.conv or args.conv_tokens:  # the conv head-to-head
+    if args.conv or args.conv_tokens or args.antipode_conv:  # conv head-to-head
         steps = args.steps if args.steps is not None else 1500
         train_n = (None if (args.train_n is not None and args.train_n <= 0)
                    else args.train_n)
-        mode = "conv_tokens" if args.conv_tokens else "addr_conv"
+        mode = ("antipode_conv" if args.antipode_conv
+                else "conv_tokens" if args.conv_tokens else "addr_conv")
         conv_cfg = RunConfig(
             dataset=args.dataset, train_n=train_n,
             batch=args.batch or 128, root=args.root, steps=steps,

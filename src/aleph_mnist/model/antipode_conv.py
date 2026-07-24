@@ -42,6 +42,25 @@ from .trunk import SquaredReLU, TrunkOutput
 READ_MODES = ("soft", "mag", "none", "off")
 
 
+def signed_antipode_read(slots: torch.Tensor, codebook: torch.Tensor,
+                         tau: float, mode: str) -> torch.Tensor:
+    """The one antipode read, shared by every antipode module. `slots` is
+    (..., D); returns (..., D), UNIT-NORM. soft = signed m_hat (ODD:
+    read(-s) = -read(s)); mag = the same read on |u| (EVEN — sign discarded);
+    none = passthrough. Sphere-normalized so soft and mag are scale-matched
+    (their only difference is direction = the sign)."""
+    if mode == "none":
+        return F.normalize(slots, dim=-1)                  # codebook unread
+    A = F.normalize(codebook, dim=-1)
+    u = (F.normalize(slots, dim=-1) @ A.transpose(-1, -2)) / tau
+    if mode == "mag":
+        u = u.abs()                                        # sign-collapsed
+    m = u.abs().amax(dim=-1, keepdim=True)
+    ep, en = torch.exp(u - m), torch.exp(-u - m)
+    read = ((ep - en) @ A) / (ep + en).sum(dim=-1, keepdim=True)
+    return F.normalize(read, dim=-1)                       # scale-matched
+
+
 def _groups(c: int) -> int:
     for g in (8, 4, 2, 1):
         if c % g == 0:
@@ -131,25 +150,8 @@ class AntipodeRead(nn.Module):
             self.gate = nn.Parameter(torch.tensor(float(gate_init)))
 
     def _read(self, slots: torch.Tensor) -> torch.Tensor:
-        """(B,T,n_slots,D) -> (B,T,n_slots,D), UNIT-NORM per slot. soft = signed
-        m_hat direction (odd); mag = the same read on |u| (a token and its
-        antipode give the SAME read — sign discarded); none = passthrough.
-
-        The read is sphere-normalized so soft and mag are SCALE-MATCHED: mag's
-        |u| collapses every atom into the +hemisphere, which shrinks its raw
-        norm ~2.3x, so without this `soft - mag` would confound the SIGN with
-        magnitude. Normalized, the arms differ only in DIRECTION — which is the
-        sign. Normalization is odd, so soft stays odd and mag stays even."""
-        if self.mode == "none":
-            return F.normalize(slots, dim=-1)              # codebook unread
-        A = F.normalize(self.addr.codebook, dim=-1)
-        u = (F.normalize(slots, dim=-1) @ A.transpose(-1, -2)) / self.tau
-        if self.mode == "mag":
-            u = u.abs()                                    # sign-collapsed
-        m = u.abs().amax(dim=-1, keepdim=True)
-        ep, en = torch.exp(u - m), torch.exp(-u - m)
-        read = ((ep - en) @ A) / (ep + en).sum(dim=-1, keepdim=True)
-        return F.normalize(read, dim=-1)                   # scale-matched
+        return signed_antipode_read(slots, self.addr.codebook, self.tau,
+                                    self.mode)
 
     def forward(self, t: torch.Tensor) -> torch.Tensor:
         if self.mode == "off":
@@ -280,3 +282,172 @@ def build_conv_token_trunk(bed, cfg) -> ConvTokenTrunk:
         objective=getattr(cfg, "objective", "classify"),
         n_bins=getattr(cfg, "n_bins", 16), seed=getattr(cfg, "seed", 0))
     return ConvTokenTrunk(conv_cfg).to(bed.xtr.device)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# AntipodeConv2d — the ENTIRE convolution is the antipode read.
+# ══════════════════════════════════════════════════════════════════════════
+class AntipodeConv2d(nn.Module):
+    """A convolution whose filter IS the signed antipode read. A standard conv
+    is `unfold -> linear -> fold`; this is `unfold -> antipode-read -> fold`.
+
+    At each position the k x k neighbourhood is projected to `n_slots` D-sphere
+    slots (the `query` conv — this is the conv's locality + weight-sharing, the
+    only thing kept from convolution), read by the SIGNED m_hat (the sole
+    operation and the sole nonlinearity — no ReLU), and projected to the output
+    channels (the 1x1 `out` conv). There is NO plain-conv filter doing separate
+    work: every output value is a signed antipode read of a local neighbourhood.
+
+    Arms: soft (signed antipode) / mag (|u|, sign-collapsed) / none (passthrough,
+    codebook unread) / off (skip the read: `out(query(x))` = a factored LINEAR
+    conv — the plain-conv control the antipode must beat)."""
+
+    def __init__(self, c_in: int, c_out: int, *, kernel: int = 3, stride: int = 1,
+                 k_addr: int = 64, d_addr: int = 4, n_slots: int = 16,
+                 tau: float = 0.1, mode: str = "soft",
+                 codebook_init: str = "fibonacci"):
+        super().__init__()
+        if mode not in READ_MODES:
+            raise ValueError(f"mode must be one of {READ_MODES}, got {mode!r}")
+        self.mode, self.n_slots, self.d_addr, self.tau = (
+            mode, n_slots, d_addr, tau)
+        # the neighbourhood -> slots map: the conv's locality + weight sharing
+        self.query = nn.Conv2d(c_in, n_slots * d_addr, kernel, stride=stride,
+                               padding=kernel // 2, bias=False)
+        nn.init.orthogonal_(self.query.weight.view(n_slots * d_addr, -1))
+        self.out = nn.Conv2d(n_slots * d_addr, c_out, 1, bias=False)
+        if mode not in ("off",):
+            self.addr = AlephAddress(k_addr, d_addr, tau)
+            if codebook_init == "fibonacci":
+                with torch.no_grad():
+                    self.addr.codebook.copy_(
+                        super_fibonacci_s3(k_addr).to(self.addr.codebook))
+                    self.addr.home.copy_(
+                        F.normalize(self.addr.codebook.detach(), dim=-1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        s = self.query(x)                                  # (B, n_slots*D, H, W)
+        B, _, H, W = s.shape
+        if self.mode == "off":                             # factored linear conv
+            return self.out(s)
+        slots = s.view(B, self.n_slots, self.d_addr, H, W)
+        # D to the last axis for the read, then back
+        slots = slots.permute(0, 1, 3, 4, 2)               # (B,n_slots,H,W,D)
+        read = signed_antipode_read(slots, self.addr.codebook, self.tau,
+                                    self.mode)
+        read = read.permute(0, 1, 4, 2, 3).reshape(B, -1, H, W)
+        return self.out(read)
+
+
+class AntipodeConvBlock(nn.Module):
+    """Residual antipode conv: `x + out(m_hat(query(GN x)))`, downsample via the
+    query stride. The affine-free GroupNorm is standardization only — the
+    antipode read is the block's sole nonlinear OPERATION (no ReLU anywhere)."""
+
+    def __init__(self, c_in: int, c_out: int, *, stride: int, mode: str,
+                 **kw):
+        super().__init__()
+        self.norm = nn.GroupNorm(_groups(c_in), c_in, affine=False)
+        self.conv = AntipodeConv2d(c_in, c_out, stride=stride, mode=mode, **kw)
+        self.proj = (nn.Conv2d(c_in, c_out, 1, stride=stride, bias=False)
+                     if (c_in != c_out or stride != 1) else nn.Identity())
+
+    def forward(self, x):
+        return self.proj(x) + self.conv(self.norm(x))
+
+
+class AntipodeConvTrunk(nn.Module):
+    """A CNN whose EVERY convolution is an antipode read — no plain-conv filter,
+    no ReLU. The antipode is the whole computation. Drop-in for the harness."""
+
+    def __init__(self, cfg: ConvTokenConfig):
+        super().__init__()
+        self.cfg = cfg
+        self.C, self.H, self.W = cfg.channels, cfg.height, cfg.width
+        self.pixels = cfg.channels * cfg.height * cfg.width
+        self.objective, self.addr_mode = cfg.objective, cfg.mode
+        torch.manual_seed(cfg.seed)
+        classify = cfg.objective == "classify"
+        chs = [cfg.channels] + [cfg.d] * cfg.conv_layers
+        self.blocks = nn.ModuleList([
+            AntipodeConvBlock(chs[i], chs[i + 1],
+                              stride=2 if classify else 1, mode=cfg.mode,
+                              k_addr=cfg.k_addr, n_slots=cfg.n_slots,
+                              tau=cfg.tau, codebook_init=cfg.codebook_init)
+            for i in range(cfg.conv_layers)])
+        self.norm = nn.GroupNorm(_groups(cfg.d), cfg.d, affine=False)
+        if classify:
+            hf = cfg.height // (2 ** cfg.conv_layers)
+            wf = cfg.width // (2 ** cfg.conv_layers)
+            self.readout = nn.Linear(cfg.d * hf * wf, cfg.n_classes)
+            self.gen_head = None
+            self.hf, self.wf = hf, wf
+        else:
+            self.readout = None
+            self.gen_head = nn.Conv2d(cfg.d, cfg.n_bins, 1)
+            self.hf, self.wf = cfg.height, cfg.width
+
+    def _from_ids(self, ids):
+        base = torch.arange(self.pixels, device=ids.device,
+                            dtype=torch.float32)
+        return torch.sin(0.01 * base.unsqueeze(0)
+                         + ids.float().sum(-1, keepdim=True))
+
+    def forward(self, x=None, *, input_ids=None, labels=None, **_):
+        if x is None:
+            if input_ids is None:
+                raise ValueError("AntipodeConvTrunk needs x or input_ids")
+            x = self._from_ids(input_ids)
+        h = x.view(x.shape[0], self.C, self.H, self.W)
+        for b in self.blocks:
+            h = b(h)
+        h = self.norm(h)
+        if self.objective == "classify":
+            logits = self.readout(h.reshape(h.shape[0], -1))
+        else:
+            logits = self.gen_head(h)
+        loss = None if labels is None else F.cross_entropy(logits, labels)
+        return TrunkOutput(logits=logits, loss=loss)
+
+    @torch.no_grad()
+    def read_report(self, x) -> dict:
+        """Antipode contribution amplitude at block 0: how much the READ shapes
+        the output vs the bare query->out LINEAR path (`m_hat` removed),
+        ||conv(xn) - out(query(xn))|| / ||conv(xn)||. 0 for off."""
+        if self.addr_mode == "off":
+            return {"read_amp_mean": 0.0}
+        b = self.blocks[0]
+        xn = b.norm(x.view(x.shape[0], self.C, self.H, self.W))
+        y = b.conv(xn)                                     # antipode read path
+        lin = b.conv.out(b.conv.query(xn))                 # the read removed
+        return {"read_amp_mean": float(
+            (y - lin).norm() / y.norm().clamp_min(1e-9))}
+
+    def param_census(self) -> dict:
+        return {"addr_mode": self.addr_mode,
+                "params_total": sum(p.numel() for p in self.parameters())}
+
+
+def build_antipode_conv_trunk(bed, cfg) -> AntipodeConvTrunk:
+    spec = bed.spec
+    if spec is not None:
+        channels, height, width, n_classes = (
+            spec.channels, spec.height, spec.width, spec.classes)
+    else:
+        channels = bed.channels
+        side = int(round((bed.pixels / channels) ** 0.5))
+        if side * side * channels != bed.pixels:
+            raise ValueError(f"antipode_conv needs a 2D shape; bed "
+                             f"{bed.name!r} pixels={bed.pixels}")
+        height = width = side
+        n_classes = bed.n_classes
+    conv_cfg = ConvTokenConfig(
+        channels=channels, height=height, width=width, n_classes=n_classes,
+        mode=getattr(cfg, "mode", "soft"), d=getattr(cfg, "conv_channels", 64),
+        k_addr=getattr(cfg, "k_addr", 64), n_slots=getattr(cfg, "n_slots", 16),
+        tau=getattr(cfg, "tau", 0.1),
+        conv_layers=getattr(cfg, "conv_layers", 2),
+        codebook_init=getattr(cfg, "codebook_init", "fibonacci"),
+        objective=getattr(cfg, "objective", "classify"),
+        n_bins=getattr(cfg, "n_bins", 16), seed=getattr(cfg, "seed", 0))
+    return AntipodeConvTrunk(conv_cfg).to(bed.xtr.device)

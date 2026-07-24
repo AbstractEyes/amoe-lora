@@ -37,19 +37,25 @@ from ..data import Bed, build_bed
 from ..config import resolve_device
 from ..diagnostics import probes
 from ..model.addressed_conv import build_conv_trunk
-from ..model.antipode_conv import build_conv_token_trunk
+from ..model.antipode_conv import (build_antipode_conv_trunk,
+                                   build_conv_token_trunk)
 from .ledger import append_ledger, ledger_path
 from .loop import _fmt_progress, _snapshot
 
 CONV_ARMS = ("soft", "sign", "none", "learned", "off")     # addr_conv (filter)
-CONV_TOKEN_ARMS = ("soft", "mag", "none", "off")           # conv_tokens (read)
+CONV_TOKEN_ARMS = ("soft", "mag", "none", "off")           # read arms (both)
 
 
 def _build_trunk(bed, cfg):
-    """Dispatch on input_mode: conv_tokens = conv stem + per-token signed
-    antipode read; addr_conv = the filter-steering primitive (the cautionary
-    mean-collapse control)."""
-    if getattr(cfg, "input_mode", "") == "conv_tokens":
+    """Dispatch on input_mode:
+      antipode_conv = the ENTIRE conv IS the antipode read (no plain filter, no
+                      ReLU — the read is the sole operation);
+      conv_tokens   = a real conv stem + per-token signed antipode residual;
+      addr_conv     = the filter-steering primitive (cautionary mean-collapse)."""
+    mode = getattr(cfg, "input_mode", "")
+    if mode == "antipode_conv":
+        return build_antipode_conv_trunk(bed, cfg)
+    if mode == "conv_tokens":
         return build_conv_token_trunk(bed, cfg)
     return build_conv_trunk(bed, cfg)
 
@@ -194,7 +200,8 @@ def sweep_conv(cfg: RunConfig | None = None, seeds=(0,), arms=None,
     vs `none` (uniform=plain conv) with `learned`/`off` controls."""
     cfg = cfg or RunConfig(input_mode="addr_conv")
     if arms is None:
-        arms = (CONV_TOKEN_ARMS if cfg.input_mode == "conv_tokens"
+        arms = (CONV_TOKEN_ARMS
+                if cfg.input_mode in ("conv_tokens", "antipode_conv")
                 else CONV_ARMS)
     dev = resolve_device(cfg.device)
     if bed is None:
