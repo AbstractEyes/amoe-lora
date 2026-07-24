@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "amoe-lora"
-version = "0.4.0"
+version = "0.5.0"
 description = "Aleph mixture-of-experts adapters: train, attach, align, detach — with the honesty diagnostics built in. 0.2 adds the diffusion subsystem (amoe.diffusion) and safetensors I/O."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,11 +27,13 @@ experiment = [
     "numpy>=1.24",         # CIFAR array path; NO upper cap (Colab is numpy 2.x)
     "matplotlib>=3.7",     # diagnostics.plots (imported lazily)
 ]
-# Optional fast CIFAR: the uoft-cs/cifar10 parquet over HF's CDN (~seconds)
-# instead of torchvision's slow mirror. NO `<3` cap — that predates
-# huggingface_hub 1.0 and would fight Colab's hub. A torchvision fallback
-# already exists, so this extra is genuinely optional.
-experiment-hf = ["amoe-lora[experiment]", "datasets>=2.19"]
+# Optional fast CIFAR + publishing: the uoft-cs/cifar10 parquet over HF's CDN
+# (~seconds) instead of torchvision's slow mirror, AND `publish()` to a HF
+# repo. `huggingface_hub` is declared explicitly (datasets pulls it anyway) so
+# the publish path is guaranteed. NO `<3` cap — that predates hub 1.0 and
+# would fight Colab's hub. A torchvision fallback exists, so this stays
+# optional.
+experiment-hf = ["amoe-lora[experiment]", "datasets>=2.19", "huggingface_hub"]
 
 [project.scripts]
 amoe-convert = "amoe.io.convert:main"

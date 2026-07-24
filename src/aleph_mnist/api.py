@@ -14,8 +14,9 @@ from __future__ import annotations
 
 from .config import RunConfig, resolve_device
 from .data import Bed, build_bed
-from .train import ARMS, DATASETS, DIAL, DIMS_CLIMB
+from .train import ARMS, DATASETS, DEFAULT_REPO, DIAL, DIMS_CLIMB
 from .train import grid as _grid
+from .train import publish as _publish
 from .train import smoke as _smoke
 from .train import sweep as _sweep
 
@@ -50,3 +51,19 @@ def smoke(device: str | None = None, out: str | None = None) -> list[dict]:
     """Shapes/parse only, synthetic data — never a result. Uses CUDA when
     present (device=None), CPU on a GPU-less runner."""
     return _smoke(device=device, ledger=out)
+
+
+def publish(repo_id: str = DEFAULT_REPO, results_dir: str | None = None,
+            preset: str | None = None, *, private: bool = True,
+            dry_run: bool = False, **kw) -> dict:
+    """Push a campaign's evidence (ledger, anchors, figures, config, model
+    card) to a HuggingFace repo. Token from HF_TOKEN / Colab secret / cached
+    login — never a hardcoded value. `dry_run=True` stages and returns the
+    manifest without touching the network.
+
+        from aleph_mnist import run_sweep, publish
+        run_sweep(RunConfig(dataset="mnist", input_mode="patch"))
+        publish()                       # -> AbstractPhil/geolip-amoe-classification
+    """
+    return _publish(repo_id, results_dir, preset, private=private,
+                    dry_run=dry_run, **kw)

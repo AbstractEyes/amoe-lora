@@ -218,6 +218,22 @@ def test_model_follows_bed_device():
     trunk(bed.xtr[:4])                    # no manual .to() anywhere
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(),
+                    reason="cross-device eval needs a GPU")
+def test_evaluate_survives_device_split():
+    """A read-only probe brings the data to the MODEL's device. Regression
+    for the ship-anchor crash: `make_bed` put the bed on cuda while a (stale)
+    notebook did `build_model(bed, cfg).to('cpu')`, so the eval batch (cuda)
+    met trunk weights (cpu) -> 'mat1 is on cuda:0, other tensors on cpu'.
+    The library must not depend on the caller keeping them aligned."""
+    bed = _bed(784, 1, None)
+    trunk = build_model(bed, RunConfig(d=16)).to("cpu")   # trunk forced to cpu
+    from aleph_mnist.diagnostics import probes
+    xcuda, ycuda = bed.xte.to("cuda"), bed.yte.to("cuda")  # data on cuda
+    out = probes.evaluate(trunk, xcuda, ycuda)             # must not raise
+    assert 0.0 <= out["acc"] <= 1.0
+
+
 def test_probe_shim_is_deterministic():
     """amoe's LM-shaped _probe calls model(input_ids=...); it must work on
     this vision trunk and be a pure function of the ids."""
@@ -383,3 +399,38 @@ def test_save_anchor_without_artifact_raises():
     from aleph_mnist import save_anchor
     with pytest.raises(ValueError, match="no adapter"):
         save_anchor({"config": {}}, "unused.pt")
+
+
+# ─────────────────────────────── publish ──────────────────────────────────
+def test_publish_dry_run_stages_evidence(tmp_path):
+    """publish(dry_run=True) assembles the run folder — ledger, config,
+    verdict, model card, and any anchors — without a token or the network.
+    The default repo is the geolip line."""
+    import json
+
+    from aleph_mnist import DEFAULT_REPO, publish
+    assert DEFAULT_REPO == "AbstractPhil/geolip-amoe-classification"
+
+    ledger = tmp_path / "ledger.jsonl"
+    row = {"config": {"mode": "soft", "trainable_blocks": 4, "seed": 0,
+                      "dataset": "mnist", "input_mode": "patch", "d": 64,
+                      "n_blocks": 4, "patch_size": 4},
+           "cell": "soft/dial4/s0", "name_key": "mnist",
+           "final": {"ce": 0.12, "acc": 0.98}, "delta_vs_base_ce": 0.1,
+           "traj": []}
+    ledger.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    (tmp_path / "soft.anchor.pt").write_bytes(b"stub")   # picked up as an anchor
+
+    res = publish(results_dir=str(tmp_path), dry_run=True, make_figures=False)
+    assert res["uploaded"] is False and res["repo_id"] == DEFAULT_REPO
+    assert res["run_path"].startswith("runs/mnist-patch-")
+    for f in ("ledger.jsonl", "README.md", "config.json", "verdict.txt"):
+        assert f in res["files"], f
+    assert any(f.replace("\\", "/") == "anchors/soft.anchor.pt"
+               for f in res["files"])
+
+
+def test_publish_missing_ledger_raises(tmp_path):
+    from aleph_mnist import publish
+    with pytest.raises(FileNotFoundError, match="no ledger"):
+        publish(results_dir=str(tmp_path), dry_run=True)

@@ -49,6 +49,30 @@ from ..model.heads import set_adapters
 MOD = (1 << 31) - 1          # keeps folded codes inside int64
 
 
+# --------------------------------------------------------- device safety
+def _model_device(trunk):
+    try:
+        return next(trunk.parameters()).device
+    except StopIteration:               # parameterless model — nothing to match
+        return None
+
+
+def _align(trunk, *tensors):
+    """Move caller-supplied tensors onto the MODEL's device.
+
+    A read-only probe reads a model wherever the model already lives and
+    brings the data to it — the inverse of `build_model` (which places a
+    fresh trunk on the bed). This makes every probe immune to a device split
+    between the model and the eval batch, e.g. a caller that did
+    `build_model(bed, cfg).to('cpu')` while the bed sits on cuda (the exact
+    crash the ship-anchor eval hit). One tensor -> the tensor; many -> a list.
+    """
+    dev = _model_device(trunk)
+    out = [None if t is None else (t.to(dev) if dev is not None else t)
+           for t in tensors]
+    return out[0] if len(out) == 1 else out
+
+
 # ------------------------------------------------------------ capturing
 @contextlib.contextmanager
 def capture(heads):
@@ -69,6 +93,7 @@ def capture(heads):
 @torch.no_grad()
 def evaluate(trunk, x, y, batch: int = 1024) -> dict:
     trunk.eval()
+    x, y = _align(trunk, x, y)          # data comes to the model's device
     tot_ce, correct, n = 0.0, 0, 0
     for i in range(0, x.shape[0], batch):
         xb, yb = x[i:i + batch], y[i:i + batch]
@@ -86,6 +111,7 @@ def inertness(trunk, wrappers, x) -> dict:
     this is the zero-init leak; run it any time to size the adapter's
     total influence on the decision surface."""
     trunk.eval()
+    x = _align(trunk, x)
     set_adapters(wrappers, False)
     off = trunk(x).logits.clone()
     set_adapters(wrappers, True)
@@ -130,7 +156,7 @@ def delta_ratio(trunk, heads, x) -> list[float]:
     """Per-block ||A(h) - h|| / ||h||: how much of the residual stream
     the adapter is rewriting. The single-anchor amplitude gauge."""
     trunk.eval()
-    x = _cap_rows(trunk, x, PROBE_TOKEN_BUDGET)
+    x = _cap_rows(trunk, _align(trunk, x), PROBE_TOKEN_BUDGET)
     with capture(heads) as store:
         trunk(x)
     out = []
@@ -223,6 +249,7 @@ def sign_code_report(trunk, heads, x, y) -> dict:
     computed over an evenly-spaced sample of columns; `cols_sampled` and
     `cols_total` in each entry record exactly what was measured."""
     trunk.eval()
+    x, y = _align(trunk, x, y)
     x = _cap_rows(trunk, x, PROBE_TOKEN_BUDGET)
     y = y[:x.shape[0]]
     with capture(heads) as store:
@@ -260,6 +287,7 @@ def toggle_report(trunk, wrappers, x, y) -> dict:
     frozen trunk it must be <= 0 (off == the original model). Large
     positive damage means the artifact is no longer an adapter — it is
     half the model."""
+    x, y = _align(trunk, x, y)
     set_adapters(wrappers, True)
     on = evaluate(trunk, x, y)
     set_adapters(wrappers, False)
@@ -289,7 +317,7 @@ def vitals_report(trunk, heads, x=None) -> dict:
     if x is not None:
         trunk.eval()
         # the explicit 2K materialization is the expensive one — sample hard
-        x = _cap_rows(trunk, x, ALIVE_TOKEN_BUDGET)
+        x = _cap_rows(trunk, _align(trunk, x), ALIVE_TOKEN_BUDGET)
         with capture(heads) as store:
             trunk(x)
         alive = []

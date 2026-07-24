@@ -14,9 +14,9 @@ Install (Colab, one line, no restart):
 torchvision / datasets / numpy are imported lazily by the loaders, and
 matplotlib only inside `aleph_mnist.diagnostics.plots`.
 """
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
-from .api import make_bed, run_climb, run_sweep, smoke
+from .api import make_bed, publish, run_climb, run_sweep, smoke
 from .config import RunConfig, resolve_device
 from .data import Bed, build_bed, get_spec
 from .data import DATASET_CHANNELS, DATASET_CLASSES, DATASET_PIXELS
@@ -26,15 +26,15 @@ from .diagnostics import probes, vitals          # plots stays lazy on purpose
 from .model import (MODES, PatchHead, TinyConfig, TinyTrunk, anchor_state,
                     build_heads, build_model, build_trunk, set_adapters,
                     super_fibonacci_s3)
-from .train import (ARMS, DATASETS, DIAL, DIMS_CLIMB, append_ledger, grid,
-                    ledger_path, pretrain, results_root, run, save_anchor,
-                    sweep)
+from .train import (ARMS, DATASETS, DEFAULT_REPO, DIAL, DIMS_CLIMB,
+                    append_ledger, grid, hf_token, ledger_path, pretrain,
+                    results_root, run, save_anchor, sweep)
 
 __all__ = [
     "__version__",
     # config + the public interface
     "RunConfig", "resolve_device", "run_sweep", "run_climb", "smoke",
-    "make_bed",
+    "make_bed", "publish",
     # data
     "Bed", "build_bed", "DatasetSpec", "get_spec", "DATASET_SPECS",
     "DATASET_PIXELS", "DATASET_CLASSES", "DATASET_CHANNELS",
@@ -44,7 +44,8 @@ __all__ = [
     "super_fibonacci_s3",
     # train
     "run", "pretrain", "sweep", "grid", "save_anchor", "append_ledger",
-    "ledger_path", "results_root", "DIAL", "ARMS", "DIMS_CLIMB", "DATASETS",
+    "ledger_path", "results_root", "hf_token", "DEFAULT_REPO",
+    "DIAL", "ARMS", "DIMS_CLIMB", "DATASETS",
     # diagnostics
     "probes", "vitals",
 ]

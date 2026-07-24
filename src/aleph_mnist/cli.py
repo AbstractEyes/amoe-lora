@@ -7,15 +7,17 @@ Notebook-safe: argparse lives inside `main()` (never at import), and
 `parse_known_args` swallows the `-f /path/kernel.json` that ipykernel
 injects, so calling `main([])` from a cell never raises SystemExit.
 
-    aleph-mnist --smoke                      # shapes/parse, CPU, seconds
-    aleph-mnist --dataset mnist --seeds 0 1  # one dial sweep
-    aleph-mnist --big --trigram              # the substrate climb
+    aleph-mnist --smoke                      # shapes/parse, seconds
+    aleph-mnist --dataset mnist --seeds 0 1  # one dial sweep (linear)
+    aleph-mnist --patch --dataset mnist      # the aleph-routed ViT (real bed)
+    aleph-mnist --big --patch                # the substrate climb
+    aleph-mnist --patch --publish            # ...and push evidence to HF
 """
 from __future__ import annotations
 
-from .api import run_climb, run_sweep, smoke
+from .api import publish, run_climb, run_sweep, smoke
 from .config import RunConfig
-from .train import ARMS, DATASETS, DIAL, DIMS_CLIMB
+from .train import ARMS, DATASETS, DEFAULT_REPO, DIAL, DIMS_CLIMB
 
 
 def build_parser():
@@ -32,6 +34,10 @@ def build_parser():
     # substrate
     p.add_argument("--d", type=int, default=d.d)
     p.add_argument("--n-blocks", type=int, default=d.n_blocks)
+    p.add_argument("--patch", action="store_true",
+                   help="patch mode: the aleph-routed ViT (the real bed)")
+    p.add_argument("--patch-size", type=int, default=d.patch_size)
+    p.add_argument("--num-heads", type=int, default=d.num_heads)
     p.add_argument("--trigram", action="store_true",
                    help="byte_emb x3 input (discovery #16: channel = n-gram "
                         "order) instead of the single-linear unigram stem")
@@ -58,17 +64,26 @@ def build_parser():
     p.add_argument("--device", default=d.device or None)
     p.add_argument("--out", default=None,
                    help="ledger path (default $ALEPH_RESULTS or ./results)")
+    # publish
+    p.add_argument("--publish", action="store_true",
+                   help="after the run, push the evidence to a HuggingFace repo")
+    p.add_argument("--repo", default=DEFAULT_REPO,
+                   help=f"HF repo id for --publish (default {DEFAULT_REPO})")
+    p.add_argument("--public", action="store_true",
+                   help="make the published repo public (default private)")
     return p
 
 
 def main(argv=None) -> None:
     args, _ = build_parser().parse_known_args(argv)
     if args.smoke:
-        smoke(device=args.device or "cpu", out=args.out)
+        smoke(device=args.device, out=args.out)   # None -> CUDA when present
         return
 
     big = args.big
     trigram = args.trigram
+    patch = args.patch
+    input_mode = "patch" if patch else ("trigram" if trigram else "linear")
     steps = args.steps if args.steps is not None else (2000 if big else 1500)
     pre = args.pretrain_steps if args.pretrain_steps is not None else steps
     if args.batch is not None:
@@ -87,8 +102,8 @@ def main(argv=None) -> None:
                     train_n=train_n, batch=batch, root=args.root,
                     steps=steps, pretrain_steps=pre,
                     codebook_init=args.codebook_init,
-                    input_mode="trigram" if trigram else "linear",
-                    device=args.device or "")
+                    input_mode=input_mode, patch_size=args.patch_size,
+                    num_heads=args.num_heads, device=args.device or "")
     if big:
         run_climb(cfg, datasets=tuple(args.datasets), dims=tuple(args.dims),
                   seeds=seeds, out=args.out, include_scratch=args.scratch)
@@ -96,6 +111,11 @@ def main(argv=None) -> None:
         run_sweep(cfg, seeds=seeds, dial=tuple(args.dial),
                   arms=tuple(args.arms), out=args.out,
                   include_scratch=args.scratch)
+
+    if args.publish:
+        import os
+        results_dir = os.path.dirname(args.out) if args.out else None
+        publish(args.repo, results_dir=results_dir, private=not args.public)
 
 
 if __name__ == "__main__":
