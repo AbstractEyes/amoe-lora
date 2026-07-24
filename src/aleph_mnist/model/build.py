@@ -67,6 +67,19 @@ def build_model(bed: Bed, cfg, *, seed: int | None = None) -> TinyTrunk:
     input_mode = getattr(cfg, "input_mode", "linear")
     readout_dim = getattr(cfg, "readout_dim", 16)
     n_bins = getattr(cfg, "n_bins", 256)
+    patch_size = getattr(cfg, "patch_size", 4)
+    num_heads = getattr(cfg, "num_heads", 4)
+
+    # H, W for the patch stem: the registry knows them; a synthetic bed does
+    # not, so assume square (pixels = channels * side^2).
+    if spec is not None:
+        height, width = spec.height, spec.width
+    else:
+        side = int(round((pixels / channels) ** 0.5))
+        if side * side * channels != pixels:
+            height = width = 0            # only an error if patch mode asks
+        else:
+            height = width = side
 
     # 1. dataset parity — only when the bed came from the registry
     if spec is not None:
@@ -99,16 +112,34 @@ def build_model(bed: Bed, cfg, *, seed: int | None = None) -> TinyTrunk:
         if pixels % channels:
             raise ValueError(f"pixels={pixels} must be divisible by "
                              f"channels={channels}")
+    elif input_mode == "patch":
+        if not height or not width:
+            raise ValueError(
+                f"patch mode needs a 2D shape; bed {bed.name!r} has "
+                f"pixels={pixels}, channels={channels} which is not "
+                "channels*side^2 (use a registry dataset or square synthetic)")
+        if height % patch_size or width % patch_size:
+            raise ValueError(
+                f"patch_size={patch_size} must divide H={height} and "
+                f"W={width} (grid would be ragged); pick a divisor")
+        if d % num_heads:
+            raise ValueError(
+                f"num_heads={num_heads} must divide d={d} for the routed "
+                "attention; pick a divisor (e.g. 1, 2, 4)")
     elif input_mode == "linear":
         if tokens < 1 or pixels % tokens:
             raise ValueError(f"linear mode needs tokens>=1 dividing "
                              f"pixels={pixels}, got tokens={tokens}")
     else:
         raise ValueError(f"unknown input_mode {input_mode!r}; "
-                         "expected 'linear' or 'trigram'")
+                         "expected 'linear', 'trigram', or 'patch'")
 
-    # 3. readout-width guard (the multi-GB flatten that WDDM-spills)
-    if input_mode == "trigram":
+    # 3. readout-width guard (the multi-GB flatten that WDDM-spills). Patch
+    # mode reads the CLS token (Linear(d, C)) — no flatten — so it is exempt.
+    if input_mode == "patch":
+        T = (height // patch_size) * (width // patch_size) + 1   # + CLS
+        flat = d                                    # CLS readout width
+    elif input_mode == "trigram":
         T = _trigram_tokens(pixels, channels)
         flat = min(readout_dim, d) * T
     else:
@@ -130,7 +161,9 @@ def build_model(bed: Bed, cfg, *, seed: int | None = None) -> TinyTrunk:
         hidden_size=d, n_blocks=n_blocks, tokens=tokens, pixels=pixels,
         channels=channels, n_classes=n_classes, input_mode=input_mode,
         n_bins=n_bins, readout_dim=readout_dim, _name_or_path=name_or_path,
-        trigram_lo=lo, trigram_hi=hi))
+        trigram_lo=lo, trigram_hi=hi,
+        height=height or 0, width=width or 0, patch_size=patch_size,
+        num_heads=num_heads))
     # THE MODEL FOLLOWS THE DATA. The bed is the thing this trunk must
     # consume, so placing the trunk anywhere else is always a bug. Deriving
     # the device here (instead of trusting a caller's `.to(...)`) removes

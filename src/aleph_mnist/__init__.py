@@ -14,7 +14,7 @@ Install (Colab, one line, no restart):
 torchvision / datasets / numpy are imported lazily by the loaders, and
 matplotlib only inside `aleph_mnist.diagnostics.plots`.
 """
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 from .api import make_bed, run_climb, run_sweep, smoke
 from .config import RunConfig, resolve_device

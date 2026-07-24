@@ -46,6 +46,7 @@ def run_climb(cfg: RunConfig | None = None, *, datasets=DATASETS,
                  include_scratch=include_scratch)
 
 
-def smoke(device: str = "cpu", out: str | None = None) -> list[dict]:
-    """Shapes/parse only, CPU, synthetic data — never a result."""
+def smoke(device: str | None = None, out: str | None = None) -> list[dict]:
+    """Shapes/parse only, synthetic data — never a result. Uses CUDA when
+    present (device=None), CPU on a GPU-less runner."""
     return _smoke(device=device, ledger=out)

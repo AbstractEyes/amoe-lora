@@ -46,18 +46,47 @@ is worth knowing too.
 
 ### The bed
 
-A 4-block pre-norm residual MLP over a (B, T, d) stream — a decoder block
-with the attention removed, which is exactly the object an amoe adapter
-expects to receive. `d=64`, T=1, ~4096 class-balanced MNIST rows.
+A 4-block pre-norm residual trunk over a (B, T, d) stream — exactly the
+object an amoe adapter expects to receive. There are three input modes, and
+**the mode decides what the model can even represent:**
 
-**The starvation is the instrument.** Full MNIST on a 4-block MLP
-saturates near 98% and every arm difference vanishes into seed noise. The
-campaign has been burned by exactly this before — a four-arm codebook
-sweep on BERT reconstruction found the addressing was not load-bearing at
-all, because the task was too easy and the model routed around it. The
-ruling that came out of it governs this bed: *no champion if it is not
-actually using the alephs.* Hence the control arm below, and hence a
-capacity-starved trunk with real headroom left in it.
+| mode | token | mixing | what it is |
+|---|---|---|---|
+| `linear` | the whole image (T=1) | — | a plain 4-block MLP |
+| `trigram` | one pixel's byte-3gram (T≈784) | **none** | per-token MLPs — additive |
+| `patch` | one C×P×P region (T≈49–65) + CLS | **aleph router** | a geometric-mixing ViT |
+
+`linear` and `trigram` do **no cross-token mixing** — every block and the
+adapter are per-token, so the model is a *generalized additive model*: two
+pixels outside a single token never interact nonlinearly, at any width, and
+all spatial integration is dumped on the readout. An adapter bolted onto
+that reads a stream that was never mixed — the opposite of how
+`RelayPatchwork` rides a real host (Qwen-VL / GPT-2 decoder layers, whose
+attention has already mixed the stream). That additivity, not "the aleph is
+inert on vision," is why the linear and trigram climbs tied `soft == none`.
+
+**`patch` is the substrate the architecture requires.** A token is a genuine
+2D region, and the token mixer is the **aleph router** — signed-projective
+addresses used as a linear-attention kernel,
+`score(i,j) = p⁺_q·p⁺_k + p⁻_q·p⁻_k` (the `_hub_full` recurrence lifted from
+`acd_attention.py`). The mixer is *not* softmax, on purpose: the house law
+records that geometry **erodes** through standard attention, so the fix is a
+dedicated geometric pathway, not injection. The adapter now rides a mixed,
+non-eroding stream. The readout reads the CLS token — not GAP (house law),
+not a multi-GB flatten. Cross-token mixing is verified in the smoke suite:
+opposite-corner pixels interact ~10⁶× above float noise, where the additive
+trunks sit at exactly zero.
+
+`d=64`, ~4096 class-balanced MNIST rows.
+
+**The starvation is the instrument.** Full MNIST saturates near 98% and
+every arm difference vanishes into seed noise. The campaign has been burned
+by exactly this before — a four-arm codebook sweep on BERT reconstruction
+found the addressing was not load-bearing at all, because the task was too
+easy and the model routed around it. The ruling that came out of it governs
+this bed: *no champion if it is not actually using the alephs.* Hence the
+control arm below, and hence a capacity-starved trunk with real headroom
+left in it.
 
 ### The arms — one class, four reads, identical parameters
 
@@ -319,6 +348,18 @@ stream, with no other change. Worth a line in the roadmap.
 - The dial has 4 positions because the trunk has 4 blocks. The crossing
   point, if any, is located to ±1 block; a finer dial needs a deeper
   trunk.
+- **In `patch` mode there are now two aleph mechanisms:** the trunk's
+  routed-attention codebooks (co-trained substrate) and the adapter's
+  codebook (the shipped anchor). The dial isolates the *adapter's* marginal
+  value on a fixed mixed host; it does not, by itself, separate "aleph
+  routing helps" from "any mixing helps" — that is a trunk-level `soft`
+  vs plain-linear-attention comparison, a separate arm worth adding.
+- `linear`/`trigram` remain in the package as the *additive-baseline*
+  controls, not the headline bed. A `soft == none` tie there is now
+  expected, not a null: those trunks cannot compose above one token.
+- The patch grid slices raster-square regions; there is no learned or
+  overlapping patchification, and position is a single learned `pos_embed`
+  (no RoPE). A ragged grid (`patch_size ∤ H`) is refused at build time.
 - `sign` and `none` artifacts share the stock checkpoint layout but not
   its semantics. The meta records `address_mode`; loading one with plain
   `amoe.attach` would silently read it as `soft`. Only `soft` rows are

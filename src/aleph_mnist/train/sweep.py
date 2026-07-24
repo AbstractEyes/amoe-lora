@@ -114,16 +114,18 @@ def grid(datasets=DATASETS, dims=DIMS_CLIMB, seeds=(0, 1, 2),
     return rows
 
 
-def smoke(device: str = "cpu", ledger: str | None = None) -> list[dict]:
-    """Shapes/parse only — a handful of steps on tiny synthetic data, CPU,
-    never a result. Exercises the arm ladder and BOTH trigram forms.
+def smoke(device: str | None = None, ledger: str | None = None) -> list[dict]:
+    """Shapes/parse only — a handful of steps on tiny synthetic data, never
+    a result. Exercises the arm ladder, both trigram forms, and the
+    routed-attention PATCH mode. Uses CUDA when present (falls back to CPU on
+    a GPU-less CI runner).
 
-    Sizes are deliberately minuscule. The trigram stem turns each image
-    into a T-token sequence, so a realistic bed (T=784-1024) is ~1000x the
-    linear bed's compute — fine on a GPU for a real run, but it would turn
-    a smoke into a multi-minute CPU grind. Here T is 64 (spatial) and 16
-    (channel): enough to prove every code path, cheap enough to be a smoke.
+    Sizes are deliberately minuscule. The trigram stem turns each image into
+    a T-token sequence, so a realistic bed (T=784-1024) is ~1000x the linear
+    bed's compute. Here T is 64 (spatial) / 16 (channel) / 4+CLS (patch):
+    enough to prove every code path, cheap enough to be a smoke.
     """
+    device = resolve_device(device)
     base = RunConfig(d=16, steps=4, pretrain_steps=4, probe_every=2,
                      log_every=999, train_n=128, batch=16, synthetic=True,
                      device=device)
@@ -140,4 +142,10 @@ def smoke(device: str = "cpu", ledger: str | None = None) -> list[dict]:
                   tb, None)
         append_ledger(row, ledger)
         rows.append(row)
+    # patch mode: 8x8 image, patch 4 -> 2x2 grid + CLS, aleph-routed mixing
+    pb = build_bed(train_n=128, synthetic=True, pixels=64, channels=1).to(device)
+    row = run(replace(base, input_mode="patch", patch_size=4, num_heads=4,
+                      mode="soft", trainable_blocks=4, tag="patch"), pb, None)
+    append_ledger(row, ledger)
+    rows.append(row)
     return rows

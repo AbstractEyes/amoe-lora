@@ -148,6 +148,64 @@ def test_trigram_token_counts():
     assert gray.n_tokens == 784 and gray.stem.kind == "spatial"
 
 
+# ─────────────────── patch mode: the mixing the bed requires ───────────────
+@pytest.mark.parametrize("pixels,channels,side,patch,ntok", [
+    (784, 1, 28, 4, 49 + 1),        # mnist/fashion: 7x7 patches + CLS
+    (3072, 3, 32, 4, 64 + 1)])      # cifar10:       8x8 patches + CLS
+def test_patch_forward_and_token_count(pixels, channels, side, patch, ntok):
+    """A patch token is one C x P x P region; T = (H/P)(W/P) + CLS. The
+    readout is CLS-only Linear(d, C) — no flatten, no GAP."""
+    bed = _bed(pixels, channels, None)
+    trunk = build_model(bed, RunConfig(d=16, input_mode="patch",
+                                       patch_size=patch, num_heads=4))
+    assert trunk.n_tokens == ntok
+    assert trunk.readout.in_features == 16 and trunk.readout_proj is None
+    out = trunk(bed.xtr[:4], labels=bed.ytr[:4])
+    assert out.logits.shape == (4, 10) and out.loss.ndim == 0
+
+
+def test_patch_mode_actually_mixes_tokens():
+    """THE point of the rebuild. The linear/trigram trunks are generalized
+    additive models: two pixels more than the trigram window apart never
+    interact, at any width. The routed-attention patch trunk must break that
+    — opposite-corner pixels must interact well above float noise.
+
+    Measured by the 2x2 finite-difference interaction
+    L(x+aᵢ+bⱼ) - L(x+aᵢ) - L(x+bⱼ) + L(x); ~0 ⇒ additive, ≠0 ⇒ they mix."""
+    bed = _bed(784, 1, None)
+    patch = build_model(bed, RunConfig(d=16, input_mode="patch",
+                                       patch_size=4, num_heads=4)).eval()
+    additive = build_model(bed, RunConfig(d=16, input_mode="trigram")).eval()
+    x0 = torch.rand(784) * 4 - 2
+
+    def interaction(trunk, i, j, delta=1.5):
+        @torch.no_grad()
+        def L(x):
+            return trunk(x.unsqueeze(0)).logits[0]
+        a, b, ab = x0.clone(), x0.clone(), x0.clone()
+        a[i] += delta
+        b[j] += delta
+        ab[i] += delta
+        ab[j] += delta
+        return (L(ab) - L(a) - L(b) + L(x0)).abs().max().item()
+
+    corners = (0, 783)              # opposite corners, 27 rows apart
+    assert interaction(additive, *corners) < 1e-5     # additive: no mixing
+    assert interaction(patch, *corners) > 1e-3        # routed: real mixing
+
+
+def test_patch_mode_rejects_ragged_grid():
+    bed = _bed(784, 1, None)
+    with pytest.raises(ValueError, match="must divide"):
+        build_model(bed, RunConfig(d=16, input_mode="patch", patch_size=5))
+
+
+def test_patch_mode_rejects_indivisible_heads():
+    bed = _bed(784, 1, None)
+    with pytest.raises(ValueError, match="num_heads"):
+        build_model(bed, RunConfig(d=18, input_mode="patch", num_heads=4))
+
+
 def test_model_follows_bed_device():
     """The trunk lands on the BED's device. Placing it anywhere else is
     always a bug: on Colab `build_model(bed, cfg).to(cfg.device or 'cpu')`
@@ -262,6 +320,35 @@ def test_strict_attach_roundtrip_synthetic(tmp_path):
     save_anchor(row, path)
     amoe.attach(build_model(bed, cfg), path,
                 binding="blocks", strict=True).detach(verify=True)
+
+
+def test_strict_attach_roundtrip_patch(tmp_path):
+    """The RelayPatchwork adapter must still attach/toggle/detach when it
+    rides the routed-attention host — the whole reason Option 1 keeps the
+    adapter is that this round-trip holds on the mixed substrate."""
+    import amoe
+    from dataclasses import asdict
+
+    from aleph_mnist import anchor_state, build_bed, save_anchor
+    from aleph_mnist.diagnostics import probes
+
+    cfg = RunConfig(d=16, input_mode="patch", patch_size=4, num_heads=4,
+                    synthetic=True, train_n=64)
+    bed = build_bed(train_n=64, synthetic=True, pixels=784, channels=1)
+    trunk = build_model(bed, cfg)
+    heads, sites, _ = build_heads(trunk, mode="soft", seed=0)
+    row = {"config": asdict(cfg), "name_key": bed.name_key,
+           "_artifact": {"state": anchor_state(heads, sites), "sites": sites}}
+    path = str(tmp_path / "patch.anchor.pt")
+    save_anchor(row, path)
+
+    fresh = build_model(bed, cfg)
+    base = probes.evaluate(fresh, bed.xte, bed.yte)
+    handle = amoe.attach(fresh, path, binding="blocks", strict=True)
+    with handle.all_off():
+        off = probes.evaluate(fresh, bed.xte, bed.yte)
+    assert off["ce"] == base["ce"], "adapters off must equal the base exactly"
+    handle.detach(verify=True)
 
 
 # ─────────────────────────── CLI and ledger ───────────────────────────────
