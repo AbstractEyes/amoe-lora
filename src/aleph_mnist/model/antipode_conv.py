@@ -40,6 +40,11 @@ from .heads import super_fibonacci_s3
 from .trunk import SquaredReLU, TrunkOutput
 
 READ_MODES = ("soft", "mag", "none", "off")
+# AntipodeConv2d additionally offers `relu`: the SAME architecture with a
+# standard nonlinearity in place of the antipode read (out(relu(query(x)))).
+# It is the matched standard-nonlinearity control — the honest answer to "how
+# far does an ordinary activation get in this exact network?"
+ANTIPODE_CONV_MODES = READ_MODES + ("relu",)
 
 
 def signed_antipode_read(slots: torch.Tensor, codebook: torch.Tensor,
@@ -180,7 +185,7 @@ class ConvTokenConfig:
                  mode="soft", d=64, k_addr=64, n_slots=16, tau=0.1,
                  conv_layers=2, kernel=3, read_layers=2, gate_init=-1.5,
                  codebook_init="fibonacci", objective="classify", n_bins=16,
-                 seed=0):
+                 pool_every=1, seed=0):
         self.__dict__.update(locals())
         del self.__dict__["self"]
 
@@ -307,8 +312,9 @@ class AntipodeConv2d(nn.Module):
                  tau: float = 0.1, mode: str = "soft",
                  codebook_init: str = "fibonacci"):
         super().__init__()
-        if mode not in READ_MODES:
-            raise ValueError(f"mode must be one of {READ_MODES}, got {mode!r}")
+        if mode not in ANTIPODE_CONV_MODES:
+            raise ValueError(
+                f"mode must be one of {ANTIPODE_CONV_MODES}, got {mode!r}")
         self.mode, self.n_slots, self.d_addr, self.tau = (
             mode, n_slots, d_addr, tau)
         # the neighbourhood -> slots map: the conv's locality + weight sharing
@@ -316,7 +322,7 @@ class AntipodeConv2d(nn.Module):
                                padding=kernel // 2, bias=False)
         nn.init.orthogonal_(self.query.weight.view(n_slots * d_addr, -1))
         self.out = nn.Conv2d(n_slots * d_addr, c_out, 1, bias=False)
-        if mode not in ("off",):
+        if mode not in ("off", "relu"):
             self.addr = AlephAddress(k_addr, d_addr, tau)
             if codebook_init == "fibonacci":
                 with torch.no_grad():
@@ -330,6 +336,8 @@ class AntipodeConv2d(nn.Module):
         B, _, H, W = s.shape
         if self.mode == "off":                             # factored linear conv
             return self.out(s)
+        if self.mode == "relu":            # matched standard-nonlinearity arm
+            return self.out(F.relu(s))
         slots = s.view(B, self.n_slots, self.d_addr, H, W)
         # D to the last axis for the read, then back
         slots = slots.permute(0, 1, 3, 4, 2)               # (B,n_slots,H,W,D)
@@ -368,17 +376,34 @@ class AntipodeConvTrunk(nn.Module):
         self.objective, self.addr_mode = cfg.objective, cfg.mode
         torch.manual_seed(cfg.seed)
         classify = cfg.objective == "classify"
+        # DEPTH SCHEDULE. pool_every=1 (default) keeps the legacy stride-2
+        # block, which halves at EVERY layer — so on 32x32 CIFAR you cannot go
+        # past ~4 layers before the map collapses. pool_every>1 switches the
+        # convs to stride 1 and inserts a MaxPool every `pool_every` blocks, so
+        # depth and downsampling are decoupled (e.g. 6 layers, pool_every=2 ->
+        # 32->16->8->4). The default is unchanged so prior runs reproduce.
+        pool_every = max(1, int(getattr(cfg, "pool_every", 1)))
+        legacy = pool_every == 1
+        self._pool_after = set() if (legacy or not classify) else {
+            i for i in range(cfg.conv_layers) if (i + 1) % pool_every == 0}
         chs = [cfg.channels] + [cfg.d] * cfg.conv_layers
         self.blocks = nn.ModuleList([
             AntipodeConvBlock(chs[i], chs[i + 1],
-                              stride=2 if classify else 1, mode=cfg.mode,
+                              stride=2 if (classify and legacy) else 1,
+                              mode=cfg.mode,
                               k_addr=cfg.k_addr, n_slots=cfg.n_slots,
                               tau=cfg.tau, codebook_init=cfg.codebook_init)
             for i in range(cfg.conv_layers)])
         self.norm = nn.GroupNorm(_groups(cfg.d), cfg.d, affine=False)
         if classify:
-            hf = cfg.height // (2 ** cfg.conv_layers)
-            wf = cfg.width // (2 ** cfg.conv_layers)
+            n_down = cfg.conv_layers if legacy else len(self._pool_after)
+            hf = cfg.height // (2 ** n_down)
+            wf = cfg.width // (2 ** n_down)
+            if hf < 1 or wf < 1:
+                raise ValueError(
+                    f"{cfg.conv_layers} layers downsample {cfg.height}x"
+                    f"{cfg.width} to {hf}x{wf} — raise pool_every (currently "
+                    f"{pool_every}) so depth stops halving every block")
             self.readout = nn.Linear(cfg.d * hf * wf, cfg.n_classes)
             self.gen_head = None
             self.hf, self.wf = hf, wf
@@ -399,8 +424,10 @@ class AntipodeConvTrunk(nn.Module):
                 raise ValueError("AntipodeConvTrunk needs x or input_ids")
             x = self._from_ids(input_ids)
         h = x.view(x.shape[0], self.C, self.H, self.W)
-        for b in self.blocks:
+        for i, b in enumerate(self.blocks):
             h = b(h)
+            if i in self._pool_after:
+                h = F.max_pool2d(h, 2)
         h = self.norm(h)
         if self.objective == "classify":
             logits = self.readout(h.reshape(h.shape[0], -1))
@@ -414,7 +441,7 @@ class AntipodeConvTrunk(nn.Module):
         """Antipode contribution amplitude at block 0: how much the READ shapes
         the output vs the bare query->out LINEAR path (`m_hat` removed),
         ||conv(xn) - out(query(xn))|| / ||conv(xn)||. 0 for off."""
-        if self.addr_mode == "off":
+        if self.addr_mode in ("off", "relu"):
             return {"read_amp_mean": 0.0}
         b = self.blocks[0]
         xn = b.norm(x.view(x.shape[0], self.C, self.H, self.W))
@@ -447,6 +474,7 @@ def build_antipode_conv_trunk(bed, cfg) -> AntipodeConvTrunk:
         k_addr=getattr(cfg, "k_addr", 64), n_slots=getattr(cfg, "n_slots", 16),
         tau=getattr(cfg, "tau", 0.1),
         conv_layers=getattr(cfg, "conv_layers", 2),
+        pool_every=getattr(cfg, "pool_every", 1),
         codebook_init=getattr(cfg, "codebook_init", "fibonacci"),
         objective=getattr(cfg, "objective", "classify"),
         n_bins=getattr(cfg, "n_bins", 16), seed=getattr(cfg, "seed", 0))

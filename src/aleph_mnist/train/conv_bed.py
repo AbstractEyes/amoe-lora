@@ -43,7 +43,12 @@ from .ledger import append_ledger, ledger_path
 from .loop import _fmt_progress, _snapshot
 
 CONV_ARMS = ("soft", "sign", "none", "learned", "off")     # addr_conv (filter)
-CONV_TOKEN_ARMS = ("soft", "mag", "none", "off")           # read arms (both)
+CONV_TOKEN_ARMS = ("soft", "mag", "none", "off")           # conv_tokens reads
+# antipode_conv adds `relu`: the SAME network with a standard nonlinearity
+# instead of the antipode read — the matched control that says how much of the
+# result is "geometry" vs "any nonlinearity". `mag` leads on CIFAR, so it runs
+# first.
+ANTIPODE_CONV_ARMS = ("mag", "soft", "none", "relu", "off")
 
 
 def _build_trunk(bed, cfg):
@@ -136,9 +141,16 @@ def run_conv(cfg: RunConfig, bed: Bed, base_state=None) -> dict:
 
     base_eval = _eval(trunk)
     opt = laws.make_optimizer(trunk.parameters(), cfg.lr_head)
+    sched = None
+    if getattr(cfg, "lr_schedule", "none") == "cosine":
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt, T_max=cfg.steps, eta_min=cfg.lr_head * 0.01)
     row = {"config": asdict(cfg), "cell": cfg.cell, "device": str(dev),
            "name_key": bed.name_key, "bed": bed.name,
            "params": trunk.param_census(), "base_eval": base_eval, "traj": []}
+    # the FINAL eval is one noisy point; a long run's best probe is often
+    # ~0.5-1 acc better. Track it so the row reports both, honestly labelled.
+    best = None
 
     t0 = time.time()
     trunk.train()
@@ -158,6 +170,8 @@ def run_conv(cfg: RunConfig, bed: Bed, base_state=None) -> dict:
         loss.backward()
         torch.nn.utils.clip_grad_norm_(trunk.parameters(), max(lv, 1.0))
         opt.step()
+        if sched is not None:
+            sched.step()
         if step % cfg.probe_every == 0 or step == 1:
             if generative:
                 va = _eval(trunk)
@@ -169,6 +183,14 @@ def run_conv(cfg: RunConfig, bed: Bed, base_state=None) -> dict:
                 snap = _snapshot(step, lv, trunk, bed, None, {})
             snap["addr"] = _report(trunk, bed.xte[:512])
             row["traj"].append(snap)
+            better = (best is None or
+                      (snap["bpb"] < best["bpb"] if generative
+                       else snap["acc"] > best["acc"]))
+            if better:
+                best = {k: snap[k] for k in ("step", "ce", "acc")
+                        if k in snap}
+                if generative:
+                    best["bpb"] = snap["bpb"]
             trunk.train()
         if step % cfg.log_every == 0 or step == 1:
             snap = row["traj"][-1] if row["traj"] else _snapshot(
@@ -188,6 +210,7 @@ def run_conv(cfg: RunConfig, bed: Bed, base_state=None) -> dict:
     row["delta_vs_base_ce"] = base_eval[key] - row["final"][key]
     row["delta_vs_base_acc"] = row["final"]["acc"] - base_eval["acc"]
     row["addr_final"] = _report(trunk, bed.xte[:1024])
+    row["best_probe"] = best        # best PROBE (not a checkpoint) — see above
     return row
 
 
@@ -200,8 +223,8 @@ def sweep_conv(cfg: RunConfig | None = None, seeds=(0,), arms=None,
     vs `none` (uniform=plain conv) with `learned`/`off` controls."""
     cfg = cfg or RunConfig(input_mode="addr_conv")
     if arms is None:
-        arms = (CONV_TOKEN_ARMS
-                if cfg.input_mode in ("conv_tokens", "antipode_conv")
+        arms = (ANTIPODE_CONV_ARMS if cfg.input_mode == "antipode_conv"
+                else CONV_TOKEN_ARMS if cfg.input_mode == "conv_tokens"
                 else CONV_ARMS)
     dev = resolve_device(cfg.device)
     if bed is None:

@@ -186,6 +186,37 @@ def test_antipode_conv_arms_param_matched():
     assert n["soft"] == n["mag"] == n["none"], n
 
 
+def test_relu_arm_is_the_matched_nonlinearity_control():
+    """`relu` is the SAME network with a standard nonlinearity in place of the
+    antipode read — the control that separates 'geometry' from 'any
+    nonlinearity'. It carries no codebook and is genuinely nonlinear."""
+    r = AntipodeConv2d(4, 8, mode="relu").eval()
+    x1, x2 = torch.randn(2, 4, 9, 9), torch.randn(2, 4, 9, 9)
+    assert not hasattr(r, "addr")
+    assert not torch.allclose(r(2 * x1 + 3 * x2), 2 * r(x1) + 3 * r(x2),
+                              atol=1e-3)
+
+
+def test_pool_every_decouples_depth_from_downsampling():
+    """pool_every=1 (default) halves at every block — 6 layers on 32x32 would
+    collapse. pool_every=2 keeps stride 1 and pools every 2 blocks, so depth is
+    reachable. The legacy default must stay byte-identical in geometry so prior
+    runs reproduce."""
+    from aleph_mnist.model.antipode_conv import AntipodeConvTrunk
+    deep = AntipodeConvTrunk(ConvTokenConfig(
+        channels=3, height=32, width=32, mode="mag", d=32, conv_layers=6,
+        pool_every=2, n_slots=8))
+    assert (deep.hf, deep.wf) == (4, 4)
+    assert deep(torch.randn(2, 3072)).logits.shape == (2, 10)
+    legacy = AntipodeConvTrunk(ConvTokenConfig(
+        channels=3, height=32, width=32, mode="mag", d=32, conv_layers=3,
+        n_slots=8))
+    assert (legacy.hf, legacy.wf) == (4, 4)          # unchanged default
+    with pytest.raises(ValueError, match="pool_every"):
+        AntipodeConvTrunk(ConvTokenConfig(channels=3, height=32, width=32,
+                                          d=16, conv_layers=6, n_slots=8))
+
+
 @pytest.mark.parametrize("objective,shape", [
     ("classify", (3, 10)), ("generate", (3, 16, 28, 28))])
 def test_antipode_conv_trunk_shapes(objective, shape):

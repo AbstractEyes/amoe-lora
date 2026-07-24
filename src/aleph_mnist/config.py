@@ -46,6 +46,10 @@ class RunConfig:
     steps: int = 1500
     lr_head: float = 1e-3
     lr_trunk: float = 1e-4
+    lr_schedule: str = "none"       # none | cosine. OFF by default: the ACD
+    #                                 convention is flat pure-Adam, no
+    #                                 scheduler. Opt in for long conv runs,
+    #                                 where a flat LR leaves accuracy behind.
     codebook_init: str = "random"   # random | fibonacci
     input_mode: str = "linear"      # linear|trigram|patch|addr_conv|
     #                                 conv_tokens|antipode_conv
@@ -65,6 +69,9 @@ class RunConfig:
     kernel_size: int = 3            # conv kernel (odd, for 'same' padding)
     conv_channels: int = 32         # base width; block i has conv_channels*2^i
     conv_layers: int = 2            # addressed-conv blocks (also conv-stem depth)
+    pool_every: int = 1             # 1 = legacy stride-2 every block; >1 keeps
+    #                                 stride 1 and pools every N blocks, so you
+    #                                 can go deep without collapsing the map
     read_layers: int = 2            # conv_tokens: per-token antipode read blocks
     n_slots: int = 4                # address slots read per position
     objective: str = "classify"     # classify | generate (masked-pixel recon)

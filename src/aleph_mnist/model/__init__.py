@@ -8,7 +8,7 @@ low-level primitive it delegates to.
 from .addressed_conv import (ADDR_MODES, AddressedConv2d, AddrConvSpec,
                             ConvBlock, ConvConfig, ConvGenHead, ConvTrunk,
                             build_conv_trunk)
-from .antipode_conv import (READ_MODES, AntipodeConv2d, AntipodeConvBlock,
+from .antipode_conv import (ANTIPODE_CONV_MODES, READ_MODES, AntipodeConv2d, AntipodeConvBlock,
                             AntipodeConvTrunk, AntipodeRead, ConvStem,
                             ConvTokenConfig, ConvTokenTrunk, SignedSquare,
                             build_antipode_conv_trunk, build_conv_token_trunk,
@@ -32,4 +32,5 @@ __all__ = ["build_model", "READOUT_MAX", "MODES", "PatchHead", "anchor_state",
            "AntipodeRead", "ConvStem", "ConvTokenConfig", "ConvTokenTrunk",
            "SignedSquare", "build_conv_token_trunk", "READ_MODES",
            "AntipodeConv2d", "AntipodeConvBlock", "AntipodeConvTrunk",
-           "build_antipode_conv_trunk", "signed_antipode_read"]
+           "build_antipode_conv_trunk", "signed_antipode_read",
+           "ANTIPODE_CONV_MODES"]
