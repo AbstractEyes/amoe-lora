@@ -61,6 +61,7 @@ class RunConfig:
     # arm. This bed has no adapter — the arm ladder lives inside AddressedConv2d.
     k_bank: int = 16                # conv filter branches (the cost)
     k_addr: int = 16               # codebook atoms on S^3 (multiple of k_bank)
+    tau: float = 0.1                # address read temperature (sharpness)
     kernel_size: int = 3            # conv kernel (odd, for 'same' padding)
     conv_channels: int = 32         # base width; block i has conv_channels*2^i
     conv_layers: int = 2            # addressed-conv blocks (also conv-stem depth)

@@ -360,6 +360,7 @@ def build_conv_trunk(bed, cfg) -> ConvTrunk:
         conv_channels=getattr(cfg, "conv_channels", 32),
         conv_layers=getattr(cfg, "conv_layers", 2),
         n_slots=getattr(cfg, "n_slots", 4),
+        tau=getattr(cfg, "tau", 0.1),
         codebook_init=getattr(cfg, "codebook_init", "random"),
         objective=getattr(cfg, "objective", "classify"),
         n_bins=getattr(cfg, "n_bins", 16),
