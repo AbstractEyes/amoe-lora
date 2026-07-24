@@ -48,6 +48,66 @@ def _democracy(trunk_params, head_params) -> dict:
     return grad_norm_spread(groups)
 
 
+# how much of the training set the train-side eval samples for the gap.
+# a FIXED slice, so the train number is stable across steps (the batch loss
+# is too noisy to read a generalization gap off of).
+_TRAIN_EVAL_ROWS = 2048
+
+
+def _snapshot(step: int, train_loss: float, trunk, bed, heads,
+              spread: dict) -> dict:
+    """One trajectory row: train vs val (the generalization gap), plus the
+    adapter vitals that are cheap to read every probe. The heavy end-of-run
+    instruments (escape, sign codes, toggle damage, aliveness) stay at the
+    end — they are quadratic in the token count.
+
+    `train_ce`/`train_acc` are on a fixed training slice, so `val_ce -
+    train_ce` is a real gap and not batch noise. This bed was built to catch
+    exactly the failure where train loss collapses while val CE climbs."""
+    va = probes.evaluate(trunk, bed.xte, bed.yte)
+    tr = probes.evaluate(trunk, bed.xtr[:_TRAIN_EVAL_ROWS],
+                         bed.ytr[:_TRAIN_EVAL_ROWS])
+    snap = {"step": step, "train_loss": train_loss,
+            "train_ce": tr["ce"], "train_acc": tr["acc"],
+            "ce": va["ce"], "acc": va["acc"], "n": va["n"],
+            "gap_ce": va["ce"] - tr["ce"],          # >0 => overfitting
+            "gap_acc": tr["acc"] - va["acc"],
+            "grad": spread}
+    if heads:
+        v = probes.vitals_report(trunk, heads)
+        snap["gate_mean"] = v["gate"]["mean"]
+        snap["gate_in_band"] = v["gate"]["in_band"]
+        snap["gate_std"] = v["gate"]["std"]
+        snap["drift_mean"] = v["drift_mean"]
+        dr = probes.delta_ratio(trunk, heads, bed.xte[:512])
+        snap["delta_ratio"] = dr
+        snap["delta_ratio_mean"] = sum(dr) / len(dr)
+    return snap
+
+
+def _fmt_progress(snap: dict, base_eval: dict, cfg: RunConfig) -> str:
+    """A dense, ASCII-only progress line — the thing the console was missing.
+    train/val/gap first (the ask), then improvement over the frozen base,
+    grad democracy, and the adapter vitals when an adapter is present."""
+    parts = [
+        f"[{cfg.cell}] {snap['step']:>4}/{cfg.steps}",
+        f"train ce {snap['train_ce']:.3f} acc {snap['train_acc'] * 100:.1f}",
+        f"val ce {snap['ce']:.3f} acc {snap['acc'] * 100:.1f}",
+        f"gap ce {snap['gap_ce']:+.3f} acc {snap['gap_acc'] * 100:+.1f}",
+        f"vs-base {base_eval['ce'] - snap['ce']:+.3f}",
+    ]
+    g = snap.get("grad") or {}
+    if g.get("norms"):
+        gd = " ".join(f"{k[0]} {v:.1e}" for k, v in g["norms"].items())
+        parts.append(f"grad {gd} spread {g.get('spread_orders', 0.0):.1f}")
+    if "gate_mean" in snap:
+        band = "*" if snap.get("gate_in_band") else " "
+        parts.append(
+            f"gate {snap['gate_mean']:.4f}{band} drift "
+            f"{snap['drift_mean']:.3f} amp {snap.get('delta_ratio_mean', 0):.2f}")
+    return " | ".join(parts)
+
+
 # --------------------------------------------------------------- phase 0
 def pretrain(cfg: RunConfig, bed: Bed) -> dict:
     """Train the bare trunk. Shared by every cell at this seed so the dial
@@ -67,8 +127,14 @@ def pretrain(cfg: RunConfig, bed: Bed) -> dict:
         loss.backward()
         opt.step()
         if step % cfg.log_every == 0 or step == 1:
-            print(f"[pretrain s{cfg.seed}] step {step} loss={lv:.4f}",
-                  flush=True)
+            va = probes.evaluate(trunk, bed.xte, bed.yte)
+            tr = probes.evaluate(trunk, bed.xtr[:_TRAIN_EVAL_ROWS],
+                                 bed.ytr[:_TRAIN_EVAL_ROWS])
+            print(f"[pretrain s{cfg.seed}] {step:>4}/{cfg.pretrain_steps} "
+                  f"train ce {tr['ce']:.3f} acc {tr['acc'] * 100:.1f} | "
+                  f"val ce {va['ce']:.3f} acc {va['acc'] * 100:.1f} | "
+                  f"gap ce {va['ce'] - tr['ce']:+.3f}", flush=True)
+            trunk.train()
     ev = probes.evaluate(trunk, bed.xte, bed.yte)
     print(f"[pretrain s{cfg.seed}] base ce={ev['ce']:.4f} "
           f"acc={ev['acc']:.4f}", flush=True)
@@ -134,7 +200,9 @@ def run(cfg: RunConfig, bed: Bed, base_state: dict | None = None) -> dict:
         lv = float(loss.detach())
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        if step % cfg.probe_every == 0 or step == 1:
+        probe_due = step % cfg.probe_every == 0 or step == 1
+        log_due = step % cfg.log_every == 0 or step == 1
+        if probe_due or log_due:
             # BEFORE opt.step(): the grads are live exactly here
             spread = _democracy(trunk_params, head_params)
         opt.step()
@@ -146,20 +214,15 @@ def run(cfg: RunConfig, bed: Bed, base_state: dict | None = None) -> dict:
             print(f"[{cfg.cell}] step1 peak={peak:.2f}GiB "
                   f"s/step={row['s_per_step']:.3f} d={cfg.d} "
                   f"batch={cfg.batch}", flush=True)
-        if step % cfg.probe_every == 0 or step == 1:
-            ev = probes.evaluate(trunk, bed.xte, bed.yte)
-            snap = {"step": step, "train_loss": lv, **ev, "grad": spread}
-            if heads:
-                v = probes.vitals_report(trunk, heads)
-                snap["gate_mean"] = v["gate"]["mean"]
-                snap["gate_in_band"] = v["gate"]["in_band"]
-                snap["drift_mean"] = v["drift_mean"]
-                snap["delta_ratio"] = probes.delta_ratio(
-                    trunk, heads, bed.xte[:512])
-            row["traj"].append(snap)
+        if probe_due or log_due:
+            # one snapshot serves both the persisted trajectory and the
+            # console line, so the eval never runs twice for one step.
+            snap = _snapshot(step, lv, trunk, bed, heads, spread)
+            if probe_due:
+                row["traj"].append(snap)
+            if log_due:
+                print(_fmt_progress(snap, base_eval, cfg), flush=True)
             trunk.train()
-        if step % cfg.log_every == 0 or step == 1:
-            print(f"[{cfg.cell}] step {step} loss={lv:.4f}", flush=True)
     row["seconds"] = round(time.time() - t0, 1)
 
     # ------------------------------------------------------ final probes
@@ -177,4 +240,43 @@ def run(cfg: RunConfig, bed: Bed, base_state: dict | None = None) -> dict:
         row["inertness_at_end"] = probes.inertness(trunk, wrappers, xd)
         row["_artifact"] = {"state": anchor_state(heads, sites),
                             "sites": sites}
+    _print_final(row, cfg)
     return row
+
+
+def _print_final(row: dict, cfg: RunConfig) -> None:
+    """The end-of-run instruments the console never showed: toggle damage
+    (the co-training tax on detachability), blend-escape ratios, code
+    diversity, axis aliveness. These are the numbers the ledger keeps and a
+    reader has to grep for — print them once, at the end of the cell."""
+    f = row["final"]
+    line = [f"[{cfg.cell}] DONE {row['seconds']}s",
+            f"val ce {f['ce']:.4f} acc {f['acc'] * 100:.2f}",
+            f"vs-base ce {row['delta_vs_base_ce']:+.4f} "
+            f"acc {row['delta_vs_base_acc'] * 100:+.2f}"]
+    if "toggle" in row:
+        t = row["toggle"]
+        line.append(f"toggle-damage ce {t['damage_ce']:+.4f} "
+                    f"acc {t['damage_acc'] * 100:+.2f}")
+    if "vitals" in row:
+        v = row["vitals"]
+        line.append(f"gate {v['gate']['mean']:.4f}"
+                    f"{'*' if v['gate']['in_band'] else ' '}")
+        line.append(f"drift {v['drift_mean']:.4f}/{v['binding_target']}")
+        if v.get("aliveness"):
+            a = v["aliveness"][0]
+            line.append(f"alive {a['axes_alive']}/{a['axes_total']} "
+                        f"ppl {a['usage_ppl']:.1f}")
+    if "escape" in row:
+        e = row["escape"]
+        worst = min(e["ratio"].values()) if e["ratio"] else float("nan")
+        tag = f" ESCAPED:{','.join(e['escaped'])}" if e["escaped"] else ""
+        line.append(f"escape-ratio min {worst:.2f}{tag}")
+    if "sign_codes" in row:
+        s = row["sign_codes"]
+        mi = max((b["max"] for b in s["slot_mi_nats"]), default=0.0)
+        line.append(f"codes org {s['organism_unique']} "
+                    f"slot-MI {mi:.3f}/{s['label_entropy_nats']:.3f}nats")
+    if "inertness_at_end" in row:
+        line.append(f"inertness {row['inertness_at_end']['max_abs_dlogit']:.2e}")
+    print("  " + " | ".join(line), flush=True)

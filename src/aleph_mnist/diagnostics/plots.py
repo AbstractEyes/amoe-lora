@@ -181,15 +181,43 @@ def fig_democracy(rows, ax=None):
     return ax
 
 
+def fig_generalization(rows, ax=None):
+    """Train vs val CE over training, gap shaded — the overfitting watch.
+    This bed was built to catch the failure where train CE collapses while
+    val CE climbs (the seed-0 pass: train -> ~8e-4 while val rose)."""
+    import matplotlib.pyplot as plt
+    ax = ax or plt.subplots(figsize=(6, 4))[1]
+    for r in rows:
+        m, n, s, tag = _key(r)
+        if s != 0 or n == 0 or tag:
+            continue
+        traj = [t for t in r["traj"] if t.get("train_ce") is not None]
+        if not traj:
+            continue
+        steps = [t["step"] for t in traj]
+        tr = [t["train_ce"] for t in traj]
+        va = [t["ce"] for t in traj]
+        line, = ax.plot(steps, va, "-", alpha=0.9, label=f"{m} d{n} val")
+        ax.plot(steps, tr, "--", color=line.get_color(), alpha=0.6)
+        ax.fill_between(steps, tr, va, color=line.get_color(), alpha=0.12)
+    ax.set_xlabel("step")
+    ax.set_ylabel("CE   (solid = val, dashed = train)")
+    ax.set_title("Generalization gap (shaded = val - train)")
+    ax.legend(fontsize=6, ncol=2)
+    return ax
+
+
 def figure_set(rows, path: str | None = None):
     import matplotlib.pyplot as plt
-    fig, axes = plt.subplots(2, 3, figsize=(17, 9))
+    fig, axes = plt.subplots(2, 4, figsize=(22, 9))
     fig_dial(rows, ax=axes[0][0])
-    fig_toggle(rows, ax=axes[0][1])
-    fig_escape(rows, ax=axes[0][2])
+    fig_generalization(rows, ax=axes[0][1])
+    fig_toggle(rows, ax=axes[0][2])
+    fig_escape(rows, ax=axes[0][3])
     fig_gates(rows, ax=axes[1][0])
     fig_drift(rows, ax=axes[1][1])
     fig_democracy(rows, ax=axes[1][2])
+    axes[1][3].axis("off")
     fig.tight_layout()
     if path:
         fig.savefig(path, dpi=140, bbox_inches="tight")
@@ -199,16 +227,19 @@ def figure_set(rows, path: str | None = None):
 def verdict_table(rows) -> str:
     """One line per cell, ledger order — the thing to paste into a
     session digest."""
-    head = (f"{'cell':28} {'ce':>7} {'acc':>7} {'dCE':>8} {'gate':>7} "
-            f"{'drift':>7} {'tog_acc':>8} {'esc':>6} {'codes':>7}")
+    head = (f"{'cell':28} {'ce':>7} {'acc':>7} {'dCE':>8} {'gap':>7} "
+            f"{'gate':>7} {'drift':>7} {'tog_acc':>8} {'esc':>6} {'codes':>7}")
     out = [head, "-" * len(head)]
     for r in rows:
         v = r.get("vitals", {})
         esc = r.get("escape", {}).get("ratio", {}).get("permuted")
         sc = r.get("sign_codes", {}).get("organism_unique")
+        traj = r.get("traj") or []
+        gap = traj[-1].get("gap_ce") if traj else None      # last val - train
         out.append(
             f"{r['cell']:28} {r['final']['ce']:7.4f} "
             f"{r['final']['acc']:7.4f} {r['delta_vs_base_ce']:+8.4f} "
+            f"{gap if gap is not None else float('nan'):+7.4f} "
             f"{v.get('gate', {}).get('mean', float('nan')):7.4f} "
             f"{v.get('drift_mean', float('nan')):7.4f} "
             f"{r.get('toggle', {}).get('damage_acc', float('nan')):8.4f} "
