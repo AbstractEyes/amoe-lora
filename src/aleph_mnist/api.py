@@ -51,19 +51,25 @@ def run_climb(cfg: RunConfig | None = None, *, datasets=DATASETS,
                  include_scratch=include_scratch)
 
 
-def run_conv(cfg: RunConfig | None = None, *, seeds=(0,), arms=CONV_ARMS,
+def run_conv(cfg: RunConfig | None = None, *, seeds=(0,), arms=None,
              out: str | None = None, bed: Bed | None = None) -> list[dict]:
-    """The addressed-conv head-to-head vs a plain conv. Arms are ADDRESS modes
-    (soft/sign/none/learned/off), not amoe anchors. `soft − none` isolates the
-    aleph; `off` is the lean plain-conv baseline; `learned` a non-aleph dynamic
-    conv. Set cfg.objective='generate' for the masked-recon (bpb) phase where
-    the address can be load-bearing.
+    """The conv head-to-head. Two beds, chosen by `cfg.input_mode`:
 
-        run_conv(RunConfig(input_mode="addr_conv", dataset="mnist"))
+    - `"conv_tokens"` (recommended): a real conv stem produces per-position
+      tokens and the SIGNED aleph read is ADDED to each — the antipode is
+      load-bearing. Arms `soft`/`mag`/`none`/`off`: `soft−mag` isolates whether
+      the SIGN pays; `soft−none` whether the read pays at all.
+    - `"addr_conv"`: the filter-steering primitive (a convex re-weighting of a
+      filter mean — the cautionary control that ties, `soft`/`sign`/`none`/
+      `learned`/`off`).
+
+    `arms=None` auto-selects the right set. `cfg.objective='generate'` runs the
+    masked-recon (bpb) phase where the address can parameterize the output.
+
+        run_conv(RunConfig(input_mode="conv_tokens", dataset="mnist"))
     """
-    cfg = cfg or RunConfig(input_mode="addr_conv")
-    return _sweep_conv(replace(cfg, input_mode="addr_conv"), seeds=seeds,
-                       arms=arms, bed=bed, ledger=out)
+    cfg = cfg or RunConfig(input_mode="conv_tokens")
+    return _sweep_conv(cfg, seeds=seeds, arms=arms, bed=bed, ledger=out)
 
 
 def run_scratch(cfg: RunConfig | None = None, *, seeds=(0,), arms=ARMS,

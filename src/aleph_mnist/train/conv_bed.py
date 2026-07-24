@@ -37,10 +37,29 @@ from ..data import Bed, build_bed
 from ..config import resolve_device
 from ..diagnostics import probes
 from ..model.addressed_conv import build_conv_trunk
+from ..model.antipode_conv import build_conv_token_trunk
 from .ledger import append_ledger, ledger_path
 from .loop import _fmt_progress, _snapshot
 
-CONV_ARMS = ("soft", "sign", "none", "learned", "off")
+CONV_ARMS = ("soft", "sign", "none", "learned", "off")     # addr_conv (filter)
+CONV_TOKEN_ARMS = ("soft", "mag", "none", "off")           # conv_tokens (read)
+
+
+def _build_trunk(bed, cfg):
+    """Dispatch on input_mode: conv_tokens = conv stem + per-token signed
+    antipode read; addr_conv = the filter-steering primitive (the cautionary
+    mean-collapse control)."""
+    if getattr(cfg, "input_mode", "") == "conv_tokens":
+        return build_conv_token_trunk(bed, cfg)
+    return build_conv_trunk(bed, cfg)
+
+
+def _report(trunk, x) -> dict:
+    """Unified 'is the address meaningful?' gauge. conv_tokens reports the read
+    amplitude (contribution to the stream); addr_conv reports address usage."""
+    if hasattr(trunk, "read_report"):
+        return trunk.read_report(x)
+    return trunk.address_report(x)
 
 
 # ------------------------------------------------------ CIFAR batch aug
@@ -97,7 +116,7 @@ def run_conv(cfg: RunConfig, bed: Bed, base_state=None) -> dict:
     ADDRESS mode. Full co-training from init (no phase-0 for conv)."""
     laws.pin_precision()
     torch.manual_seed(cfg.seed)
-    trunk = build_conv_trunk(bed, cfg)          # follows the bed's device
+    trunk = _build_trunk(bed, cfg)              # follows the bed's device
     dev = bed.xtr.device
     generative = getattr(cfg, "objective", "classify") == "generate"
     spec = bed.spec
@@ -142,7 +161,7 @@ def run_conv(cfg: RunConfig, bed: Bed, base_state=None) -> dict:
                         "gap_acc": 0.0, "grad": {}}
             else:
                 snap = _snapshot(step, lv, trunk, bed, None, {})
-            snap["addr"] = trunk.address_report(bed.xte[:512])
+            snap["addr"] = _report(trunk, bed.xte[:512])
             row["traj"].append(snap)
             trunk.train()
         if step % cfg.log_every == 0 or step == 1:
@@ -150,7 +169,9 @@ def run_conv(cfg: RunConfig, bed: Bed, base_state=None) -> dict:
                 step, lv, trunk, bed, None, {})
             line = _fmt_progress(snap, base_eval, cfg)
             u = snap.get("addr") or {}
-            if u:
+            if "read_amp_mean" in u:            # conv_tokens: additive read
+                line += f" | read-amp {u['read_amp_mean']:.3f}"
+            elif "kl_to_uniform" in u:          # addr_conv: filter usage
                 line += f" | addr KL {u['kl_to_uniform']:.3f} ppl {u['usage_ppl']:.1f}"
             print(line, flush=True)
     row["seconds"] = round(time.time() - t0, 1)
@@ -160,17 +181,21 @@ def run_conv(cfg: RunConfig, bed: Bed, base_state=None) -> dict:
     key = "bpb" if generative else "ce"
     row["delta_vs_base_ce"] = base_eval[key] - row["final"][key]
     row["delta_vs_base_acc"] = row["final"]["acc"] - base_eval["acc"]
-    row["addr_final"] = trunk.address_report(bed.xte[:1024])
+    row["addr_final"] = _report(trunk, bed.xte[:1024])
     return row
 
 
 # --------------------------------------------------------------- the sweep
-def sweep_conv(cfg: RunConfig | None = None, seeds=(0,), arms=CONV_ARMS,
+def sweep_conv(cfg: RunConfig | None = None, seeds=(0,), arms=None,
                bed: Bed | None = None, ledger: str | None = None) -> list[dict]:
-    """The head-to-head: run every address-mode arm on one bed. `soft` vs
-    `none` isolates the aleph; `off` is the lean plain-conv baseline; `learned`
-    is the non-aleph dynamic-conv control."""
+    """The head-to-head: run every arm on one bed. For conv_tokens: `soft`
+    (signed antipode) vs `mag` (sign-collapsed) isolates whether the ANTIPODE
+    pays; vs `none`/`off` whether the read pays at all. For addr_conv: `soft`
+    vs `none` (uniform=plain conv) with `learned`/`off` controls."""
     cfg = cfg or RunConfig(input_mode="addr_conv")
+    if arms is None:
+        arms = (CONV_TOKEN_ARMS if cfg.input_mode == "conv_tokens"
+                else CONV_ARMS)
     dev = resolve_device(cfg.device)
     if bed is None:
         bed = build_bed(cfg.dataset, cfg.train_n, seed=cfg.seed, root=cfg.root,
