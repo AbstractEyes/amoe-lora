@@ -221,6 +221,17 @@ ck = load_anchor(hf_hub_download(
     "exp013_experts/ckpt/v35e13_algebra_steps_s0.pt"))   # legacy OK
 ```
 
+## Experiments live elsewhere
+
+This repo is the **library** — the address, the adapter, the laws, the
+checkpoint format, the runtime verbs. Research beds that ride it get their own
+repos, so a library release is never entangled with an experiment's cadence.
+
+- **[geolip-aleph-classification](https://github.com/AbstractEyes/geolip-aleph-classification)**
+  — the vision bed: addressed convolution, the antipode read as a network's
+  only nonlinearity, and the co-training dial. Depends on `amoe-lora@main`.
+  Evidence: [AbstractPhil/geolip-aleph-classification](https://huggingface.co/AbstractPhil/geolip-aleph-classification).
+
 ## Lineage
 
 Architecture and every default in this package trace to the
