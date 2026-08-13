@@ -94,7 +94,8 @@ def train(model, dataset, config: TrainConfig | None = None, *,
     # restore the unwrapped model
     b.set_layers(model, layers)
     meta = {"name": cfg.name,
-            "base_model_id": getattr(model.config, "_name_or_path", ""),
+            "base_model_id": getattr(getattr(model, "config", None),
+                                     "_name_or_path", ""),
             "d": d, "n_layers": len(layers), "sites": sites,
             "seed": cfg.seed, "precision": cfg.precision,
             "recipe": {"optimizer": "adam", "lr": cfg.lr,
