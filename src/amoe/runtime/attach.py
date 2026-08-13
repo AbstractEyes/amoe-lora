@@ -152,7 +152,8 @@ def attach(model, anchors, dispatch=None, *, binding=None,
     if strict:
         for c in ckpts:
             bid = c.meta.get("base_model_id")
-            live = getattr(model.config, "_name_or_path", None)
+            live = getattr(getattr(model, "config", None),
+                           "_name_or_path", None)
             if bid and live and bid not in str(live):
                 raise ValueError(
                     f"anchor '{c.meta.get('name')}' was trained on "

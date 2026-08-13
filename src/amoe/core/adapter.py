@@ -75,3 +75,18 @@ class BlockWithAdapter(nn.Module):
         if isinstance(out, tuple):
             return (self.adapter(out[0]),) + out[1:]
         return self.adapter(out)
+
+    # Incremental-decode passthroughs (trunks with a cached decode path,
+    # e.g. AlephLM prefill/step). The patch head is position-wise, so
+    # applying it to the single new position is exact.
+    def prefill(self, *args, **kwargs):
+        out, cache = self.block.prefill(*args, **kwargs)
+        return (self.adapter(out) if self.enabled else out), cache
+
+    def step(self, *args, **kwargs):
+        out = self.block.step(*args, **kwargs)
+        if not self.enabled:
+            return out
+        if isinstance(out, tuple):
+            return (self.adapter(out[0]),) + out[1:]
+        return self.adapter(out)

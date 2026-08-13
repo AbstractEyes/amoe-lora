@@ -73,6 +73,27 @@ def _generic() -> ModelBinding:
     return PathBinding("model.layers", name="generic_causal")
 
 
+@dataclass
+class AlephLMBinding:
+    """geolip.alephllm AlephLM: blocks at model.blocks, width on the
+    dataclass config (model.cfg.d_model) — no HF config object."""
+    name: str = "alephlm"
+
+    def layers(self, model):
+        return model.blocks
+
+    def set_layers(self, model, new):
+        model.blocks = nn.ModuleList(new)
+
+    def hidden_size(self, model) -> int:
+        return int(model.cfg.d_model)
+
+
+@register("alephlm")
+def _alephlm() -> ModelBinding:
+    return AlephLMBinding()
+
+
 def _candidates(model) -> list[str]:
     out = []
     for name, mod in model.named_modules():
@@ -83,7 +104,11 @@ def _candidates(model) -> list[str]:
 
 def resolve(model, binding: "ModelBinding | str | None" = None) -> ModelBinding:
     if binding is None:
-        mt = getattr(model.config, "model_type", "")
+        # AlephLM ducks first: dataclass cfg, no .config object at all
+        if hasattr(model, "blocks") and \
+                hasattr(getattr(model, "cfg", None), "d_model"):
+            return REGISTRY["alephlm"]()
+        mt = getattr(getattr(model, "config", None), "model_type", "") or ""
         if "qwen3_5" in mt and hasattr(model, "model") and \
                 hasattr(model.model, "language_model"):
             return REGISTRY["qwen3_5_vl"]()

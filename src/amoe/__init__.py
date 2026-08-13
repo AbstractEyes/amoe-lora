@@ -16,7 +16,7 @@ from .train.trainer import train
 from .train.aligner import align
 from . import laws
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 # The diffusion subsystem (amoe.diffusion) is imported lazily — its verbs
 # live under `import amoe.diffusion as ad`. Core is pure torch; diffusers

@@ -68,6 +68,17 @@ class BlockWithDispatch(nn.Module):
             return (self.disp(out[0]),) + out[1:]
         return self.disp(out)
 
+    # cached-decode passthroughs (position-wise dispatch — exact per step)
+    def prefill(self, *args, **kwargs):
+        out, cache = self.block.prefill(*args, **kwargs)
+        return self.disp(out), cache
+
+    def step(self, *args, **kwargs):
+        out = self.block.step(*args, **kwargs)
+        if isinstance(out, tuple):
+            return (self.disp(out[0]),) + out[1:]
+        return self.disp(out)
+
 
 def set_mask(dispatches, enabled) -> None:
     """Apply one enabled-list (or dict handled by the caller) to every
