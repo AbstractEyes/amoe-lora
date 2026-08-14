@@ -150,14 +150,30 @@ def attach(model, anchors, dispatch=None, *, binding=None,
              for i, c in enumerate(ckpts)]
 
     if strict:
+        # Identity comes from the BINDING, not from an assumed HF config:
+        # substrates without a .config (e.g. AlephLM) used to make this
+        # check silently inert, which is worse than no check at all.
+        live = (b.identity(model) if hasattr(b, "identity")
+                else getattr(getattr(model, "config", None),
+                             "_name_or_path", None))
         for c in ckpts:
             bid = c.meta.get("base_model_id")
-            live = getattr(getattr(model, "config", None),
-                           "_name_or_path", None)
-            if bid and live and bid not in str(live):
+            if not bid:
+                continue
+            if live is None:
+                raise ValueError(
+                    f"anchor '{c.meta.get('name')}' declares base_model_id "
+                    f"'{bid}' but this substrate exposes no identity, so "
+                    "provenance CANNOT be verified here — verify it in your "
+                    "loader, or pass strict=False to proceed knowingly")
+            bid, live_s = str(bid), str(live)
+            # a binding identity may be coarser than the anchor's (a craft
+            # name vs craft@step): prefix agreement either way is a match,
+            # anything else is a genuine substrate mismatch
+            if not (bid.startswith(live_s) or live_s.startswith(bid)):
                 raise ValueError(
                     f"anchor '{c.meta.get('name')}' was trained on "
-                    f"{bid}, live model is {live} (pass strict=False "
+                    f"{bid}, live model is {live_s} (pass strict=False "
                     "to override)")
 
     blocks = []

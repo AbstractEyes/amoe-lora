@@ -50,6 +50,9 @@ class PathBinding:
                 return int(c.hidden_size)
         raise AttributeError("no hidden_size on model.config")
 
+    def identity(self, model) -> str | None:
+        return getattr(getattr(model, "config", None), "_name_or_path", None)
+
 
 REGISTRY: dict[str, Callable[[], ModelBinding]] = {}
 
@@ -87,6 +90,10 @@ class AlephLMBinding:
 
     def hidden_size(self, model) -> int:
         return int(model.cfg.d_model)
+
+    def identity(self, model) -> str | None:
+        n = getattr(getattr(model, "cfg", None), "name", None)
+        return f"alephllm/{n}" if n else None
 
 
 @register("alephlm")
