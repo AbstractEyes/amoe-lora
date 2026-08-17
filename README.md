@@ -231,3 +231,6 @@ published self-retraction plus a corrected overclaim), its
 and — for the 0.2 diffusion subsystem — the
 [geolip-aleph-diffusion](https://huggingface.co/AbstractPhil/geolip-aleph-diffusion)
 campaign (16 experiment packages, 2-seed program, the conditioning law).
+
+
+**Technical companion:** [TECHNICAL.md](TECHNICAL.md) — the arm system, its laws, and the Beatrix arm-program results.
