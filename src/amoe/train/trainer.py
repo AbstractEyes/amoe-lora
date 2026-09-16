@@ -82,7 +82,7 @@ def train(model, dataset, config: TrainConfig | None = None, *,
         opt.step()
         if rank == 0 and (step % cfg.log_every == 0 or step == 1):
             print(f"[amoe.train {cfg.name}] step {step} "
-                  f"loss={float(loss):.4f}", flush=True)
+                  f"loss={loss.detach().item():.4f}", flush=True)
     if hasattr(model, "gradient_checkpointing_disable"):
         model.gradient_checkpointing_disable()
     model.eval()
