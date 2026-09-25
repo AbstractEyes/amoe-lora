@@ -17,7 +17,7 @@ from .train.aligner import align
 from .train.quiet import QuietSpec, kl_abstain, quiet_step
 from . import laws
 
-__version__ = "0.2.5"
+__version__ = "0.2.6"
 
 # The diffusion subsystem (amoe.diffusion) is imported lazily — its verbs
 # live under `import amoe.diffusion as ad`. Core is pure torch; diffusers

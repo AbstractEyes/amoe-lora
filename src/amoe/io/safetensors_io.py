@@ -1,5 +1,8 @@
 """safetensors serialization for amoe anchors (new in 0.2 — the diffusion
 line needs ComfyUI-consumable artifacts; a documented 0.1 non-goal ends).
+0.2.6 adds block anchors (amoe.anchor): AnchorCheckpoint.save writes this
+format for a path ending in .safetensors, and load_anchor reads either
+format by content (is_safetensors), never by file name.
 
 Two key layouts:
   "amoe"  (canonical, portable): blocks.{site_index}.{param_path}
@@ -17,12 +20,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:   # pragma: no cover
-    from .checkpoint import DiffusionAnchorCheckpoint
+    from .checkpoint import AnchorCheckpoint, DiffusionAnchorCheckpoint
 
 
 def _require_safetensors():
@@ -108,3 +112,92 @@ def load_anchor_safetensors(path: str) -> "DiffusionAnchorCheckpoint":
             raise ValueError(f"content hash mismatch in {path}: "
                              f"{got} != {want}")
     return ck
+
+
+# ── block anchors (amoe.anchor, 0.2.6) ──────────────────────────────────
+
+def is_safetensors(src) -> bool:
+    """True when `src` (a path or a seekable binary handle) holds a
+    safetensors file: an 8-byte little-endian header length followed by a
+    JSON object that fits inside the file. Decided by content, never by
+    the file name; a handle's read position is restored."""
+    try:
+        if hasattr(src, "read"):
+            pos = src.tell()
+            try:
+                head = src.read(9)
+                src.seek(0, os.SEEK_END)
+                size = src.tell() - pos
+            finally:
+                src.seek(pos)
+        else:
+            size = os.path.getsize(src)
+            with open(src, "rb") as fh:
+                head = fh.read(9)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+    if len(head) < 9 or head[8:9] != b"{":
+        return False
+    n = int.from_bytes(head[:8], "little")
+    return 0 < n <= size - 8
+
+
+def save_block_anchor_safetensors(ck: "AnchorCheckpoint", path: str) -> str:
+    """Write a block anchor (amoe.anchor) as safetensors: tensors under the
+    canonical layout blocks.{block_index}.{param_path}, the meta as one
+    JSON blob ("amoe_meta") plus greppable duplicates. The meta must be
+    JSON-serializable. Returns the format-independent content hash."""
+    st = _require_safetensors()
+    from .checkpoint import ANCHOR_FORMAT, VERSION
+    chash = content_hash_v2(ck.adapters)
+    meta = dict(ck.meta)
+    meta["content_hash_v2"] = chash
+    try:
+        blob = json.dumps(meta)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            "anchor meta must be JSON-serializable to be stored in "
+            f"safetensors metadata ({e}); simplify the meta or save to a "
+            ".pt path") from e
+    tensors = {f"blocks.{k}": v.detach().to("cpu", copy=True).contiguous()
+               for k, v in ck.adapters.items()}
+    md = {"format": ANCHOR_FORMAT, "version": str(VERSION),
+          "key_layout": "amoe", "amoe_meta": blob, "content_hash_v2": chash}
+    for key in ("name", "base_model_id", "content_hash"):
+        if isinstance(meta.get(key), str):
+            md[key] = meta[key]
+    st.save_file(tensors, str(path), metadata=md)
+    return chash
+
+
+def load_block_anchor_safetensors(src) -> "AnchorCheckpoint":
+    """Read a block anchor (amoe.anchor) safetensors file from a path or a
+    binary handle; content_hash_v2 is verified when present."""
+    st = _require_safetensors()
+    from .checkpoint import ANCHOR_FORMAT, AnchorCheckpoint
+    where = getattr(src, "name", src)
+    if hasattr(src, "read"):
+        data = src.read()
+        n = int.from_bytes(data[:8], "little")
+        md = json.loads(data[8:8 + n].decode("utf-8")).get("__metadata__") or {}
+        tensors = st.load(data)
+    else:
+        from safetensors import safe_open
+        with safe_open(str(src), framework="pt", device="cpu") as f:
+            md = f.metadata() or {}
+            tensors = {k: f.get_tensor(k) for k in f.keys()}
+    if md.get("format") != ANCHOR_FORMAT:
+        raise ValueError(f"not an {ANCHOR_FORMAT} safetensors file: {where} "
+                         f"(format={md.get('format')!r})")
+    if md.get("key_layout", "amoe") != "amoe" or \
+            not all(k.startswith("blocks.") for k in tensors):
+        raise ValueError(f"unsupported key layout in {where}: expected "
+                         "blocks.{block_index}.{param_path}")
+    adapters = {k[len("blocks."):]: v for k, v in tensors.items()}
+    want = md.get("content_hash_v2")
+    if want:
+        got = content_hash_v2(adapters)
+        if got != want:
+            raise ValueError(f"content hash mismatch in {where}: "
+                             f"{got} != {want}")
+    return AnchorCheckpoint(adapters, json.loads(md.get("amoe_meta", "{}")))

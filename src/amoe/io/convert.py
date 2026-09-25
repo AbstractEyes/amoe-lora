@@ -11,6 +11,12 @@ Colab-safe usage (no argparse required):
 
 CLI: amoe-convert <path.pt|dir> [--substrate sd15] [--objective eps]
                   [--layout amoe|comfy] [--out OUT]
+
+Block anchors (amoe.anchor): convert_block_anchor(path) rewrites one file
+as safetensors, in place when it already carries the .safetensors name (a
+torch file saved under that extension by amoe < 0.2.6):
+    from amoe.io.convert import convert_block_anchor
+    convert_block_anchor("arms/s1_step1000.safetensors")
 """
 from __future__ import annotations
 
@@ -40,6 +46,47 @@ def convert_one(path, *, substrate: "dict | None" = None,
             f"bitwise mismatch at {k}"
     print(f"converted {path.name} -> {dst.name} "
           f"({len(ck.adapters)} tensors, kind={ck.kind}, verified bitwise)")
+    return str(dst)
+
+
+def convert_block_anchor(path, *, out: "str | None" = None) -> str:
+    """Rewrite one block anchor (amoe.anchor) as safetensors. The meta
+    travels verbatim; the file is written beside the target first, read
+    back with BITWISE tensor and meta checks, then moved into place, so a
+    failed conversion never replaces the original."""
+    import json
+    import os
+
+    from .checkpoint import load_anchor
+    from .safetensors_io import is_safetensors, save_block_anchor_safetensors
+    path = Path(path)
+    dst = Path(out) if out else path.with_suffix(".safetensors")
+    if dst == path and is_safetensors(str(path)):
+        print(f"{path.name}: already safetensors")
+        return str(path)
+    ck = load_anchor(str(path))
+    tmp = dst.with_name(dst.name + ".tmp")
+    try:
+        save_block_anchor_safetensors(ck, str(tmp))
+        back = load_anchor(str(tmp))
+        # explicit checks (not asserts): this path replaces files in place
+        if not is_safetensors(str(tmp)):
+            raise RuntimeError("not written as safetensors")
+        if set(back.adapters) != set(ck.adapters):
+            raise RuntimeError("key set changed")
+        for k in ck.adapters:
+            a, b = ck.adapters[k], back.adapters[k]
+            if a.dtype != b.dtype or not torch.equal(a, b):
+                raise RuntimeError(f"bitwise mismatch at {k}")
+        meta = {k: v for k, v in back.meta.items() if k != "content_hash_v2"}
+        if meta != json.loads(json.dumps(ck.meta)):
+            raise RuntimeError("meta changed")
+        os.replace(tmp, dst)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    print(f"converted {path.name} -> {dst.name} "
+          f"({len(ck.adapters)} tensors, verified bitwise)")
     return str(dst)
 
 

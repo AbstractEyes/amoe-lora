@@ -2,13 +2,16 @@
 
 weights_only=True-safe (tensors + primitives). Anchor state dicts MUST
 carry `addr.home` per block (law 6 of the research line). import_legacy
-converts the campaign's shipped formats.
+converts the campaign's shipped formats. An anchor saved to a path ending
+in .safetensors is a real safetensors file (safetensors_io, 0.2.6), and
+load_anchor reads either format by content.
 """
 from __future__ import annotations
 
 import datetime as _dt
 import hashlib
 import io as _io
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,10 +34,19 @@ class AnchorCheckpoint:
     meta: dict[str, Any] = field(default_factory=dict)
 
     def save(self, path: str) -> str:
+        """Write the anchor: a path ending in .safetensors gets a
+        safetensors file (safetensors_io.save_block_anchor_safetensors),
+        any other path the torch format. Returns the content hash, which
+        is the same for both formats."""
         meta = dict(self.meta)
         meta.setdefault("created", _dt.datetime.now(
             _dt.timezone.utc).isoformat())
         meta["content_hash"] = _content_hash(self.adapters)
+        if str(path).endswith(".safetensors"):
+            from .safetensors_io import save_block_anchor_safetensors
+            save_block_anchor_safetensors(
+                AnchorCheckpoint(self.adapters, meta), str(path))
+            return meta["content_hash"]
         torch.save({"format": ANCHOR_FORMAT, "version": VERSION,
                     "meta": meta, "adapters": self.adapters}, path)
         return meta["content_hash"]
@@ -63,7 +75,22 @@ def _require_home(adapters: dict) -> None:
 
 
 def load_anchor(path: str) -> AnchorCheckpoint:
-    blob = torch.load(path, map_location="cpu", weights_only=True)
+    """Load a block anchor from a path or an open binary handle. The format
+    is read from the content, never the file name: safetensors (what save()
+    writes for a .safetensors path), the torch format, or the legacy flat
+    torch shape. Torch files saved under a .safetensors name by amoe < 0.2.6
+    load unchanged."""
+    from .safetensors_io import is_safetensors, load_block_anchor_safetensors
+    if is_safetensors(path):
+        ck = load_block_anchor_safetensors(path)
+        _require_home(ck.adapters)
+        return ck
+    if isinstance(path, (str, os.PathLike)):
+        # through a handle, so no reader is chosen by the file extension
+        with open(path, "rb") as fh:
+            blob = torch.load(fh, map_location="cpu", weights_only=True)
+    else:
+        blob = torch.load(path, map_location="cpu", weights_only=True)
     if blob.get("format") == ANCHOR_FORMAT:
         _require_home(blob["adapters"])
         return AnchorCheckpoint(blob["adapters"], blob.get("meta", {}))
