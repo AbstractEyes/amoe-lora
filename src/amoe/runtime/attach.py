@@ -93,6 +93,20 @@ class AttachHandle:
             else:
                 b.enabled = s
 
+    # -- memory --------------------------------------------------------
+    def recompute(self, on: bool) -> int:
+        """Adapter recompute-in-backward on every single-anchor wrapper
+        (0.2.7): the adapter's intermediates are dropped after the forward
+        and rebuilt when the backward reaches them. Exact; one extra adapter
+        forward per backward. Dispatch stacks are left as they are. Returns
+        the number of wrappers switched."""
+        n = 0
+        for b in self._blocks:
+            if isinstance(b, BlockWithAdapter):
+                b.recompute = bool(on)
+                n += 1
+        return n
+
     # -- telemetry -----------------------------------------------------
     def telemetry(self, on: bool) -> None:
         for b in self._blocks:
@@ -132,7 +146,7 @@ class AttachHandle:
 
 def attach(model, anchors, dispatch=None, *, binding=None,
            spec: AdapterSpec | None = None,
-           strict: bool = True) -> AttachHandle:
+           strict: bool = True, recompute: bool = False) -> AttachHandle:
     b = resolve(model, binding)
     layers = list(b.layers(model))
     d = b.hidden_size(model)
@@ -187,7 +201,7 @@ def attach(model, anchors, dispatch=None, *, binding=None,
             a = RelayPatchwork(d, spec)
             a.load_state_dict(st)
             a.to(next(layer.parameters()).device)   # device-following
-            wrapped = BlockWithAdapter(layer, a)
+            wrapped = BlockWithAdapter(layer, a, recompute=recompute)
             blocks.append(wrapped)
     else:
         if dispatch is None:

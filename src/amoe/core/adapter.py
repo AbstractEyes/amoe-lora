@@ -7,7 +7,14 @@ at d=1024. Output head zero-initialized so a fresh anchor is inert
 
 BlockWithAdapter carries an `enabled` switch: when False, the forward
 returns the block output untouched — the single-anchor half of the
-toggle law.
+toggle law. It also carries a `recompute` switch (0.2.7): when True,
+the adapter's intermediates are not kept for the backward pass but
+recomputed from the block output when the backward reaches them
+(torch.utils.checkpoint, non-reentrant). Same math, one extra adapter
+forward per backward, a fraction of the activation memory: at d=1024
+on 4096-token rows the kept intermediates run ~96 MB per block per
+adapter per two-row micro-batch, which is what walls a 32-block trunk
+with several stacked arms on a 32 GB card.
 """
 from __future__ import annotations
 
@@ -16,6 +23,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from .address import AlephAddress
 
@@ -60,21 +68,40 @@ class RelayPatchwork(nn.Module):
 
 
 class BlockWithAdapter(nn.Module):
-    """Wraps one decoder block; hybrid-safe (tuple or tensor output)."""
+    """Wraps one decoder block; hybrid-safe (tuple or tensor output).
 
-    def __init__(self, block: nn.Module, adapter: RelayPatchwork):
+    `recompute=True` routes the adapter call through a non-reentrant
+    checkpoint whenever autograd is recording: the slot projection, the
+    address features and the consume MLP's hidden activations are dropped
+    after the forward and rebuilt from the block output during the
+    backward. The head is deterministic and dropout-free, so the RNG
+    state is not snapshotted (no device sync per call) and the recomputed
+    values are the values the forward produced. Inference paths (no_grad,
+    prefill, step) never checkpoint. Stacked wrappers (an arm over an
+    arm) each checkpoint their own adapter.
+    """
+
+    def __init__(self, block: nn.Module, adapter: RelayPatchwork,
+                 recompute: bool = False):
         super().__init__()
         self.block = block
         self.adapter = adapter
         self.enabled = True
+        self.recompute = bool(recompute)
+
+    def _adapt(self, h):
+        if self.recompute and torch.is_grad_enabled():
+            return checkpoint(self.adapter, h, use_reentrant=False,
+                              preserve_rng_state=False)
+        return self.adapter(h)
 
     def forward(self, *args, **kwargs):
         out = self.block(*args, **kwargs)
         if not self.enabled:
             return out
         if isinstance(out, tuple):
-            return (self.adapter(out[0]),) + out[1:]
-        return self.adapter(out)
+            return (self._adapt(out[0]),) + out[1:]
+        return self._adapt(out)
 
     # Incremental-decode passthroughs (trunks with a cached decode path,
     # e.g. AlephLM prefill/step). The patch head is position-wise, so
