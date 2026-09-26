@@ -14,7 +14,9 @@ recomputed from the block output when the backward reaches them
 forward per backward, a fraction of the activation memory: at d=1024
 on 4096-token rows the kept intermediates run ~96 MB per block per
 adapter per two-row micro-batch, which is what walls a 32-block trunk
-with several stacked arms on a 32 GB card.
+with several stacked arms on a 32 GB card. A stack of wrappers on one
+block recomputes as one chain (0.2.8), keeping one residual copy per
+block for the whole stack.
 """
 from __future__ import annotations
 
@@ -67,18 +69,31 @@ class RelayPatchwork(nn.Module):
         return x + torch.sigmoid(self.gate) * self.consume(feats)
 
 
+def _apply_chain(h, *adapters):
+    for a in adapters:
+        h = a(h)
+    return h
+
+
 class BlockWithAdapter(nn.Module):
     """Wraps one decoder block; hybrid-safe (tuple or tensor output).
 
-    `recompute=True` routes the adapter call through a non-reentrant
-    checkpoint whenever autograd is recording: the slot projection, the
-    address features and the consume MLP's hidden activations are dropped
-    after the forward and rebuilt from the block output during the
-    backward. The head is deterministic and dropout-free, so the RNG
-    state is not snapshotted (no device sync per call) and the recomputed
-    values are the values the forward produced. Inference paths (no_grad,
-    prefill, step) never checkpoint. Stacked wrappers (an arm over an
-    arm) each checkpoint their own adapter.
+    `recompute=True` (0.2.7) routes the adapter call through a
+    non-reentrant checkpoint whenever autograd is recording: the slot
+    projection, the address features and the consume MLP's hidden
+    activations are dropped after the forward and rebuilt from the block
+    output during the backward. The head is deterministic and
+    dropout-free, so the RNG state is not snapshotted (no device sync per
+    call) and the recomputed values are the values the forward produced.
+    Inference paths (no_grad, prefill, step) never checkpoint.
+
+    Stacked wrappers (0.2.8; an arm attached over an arm nests a wrapper
+    around a wrapper) recompute as ONE chain: the outermost wrapper with
+    recompute on runs the core block once and applies every enabled
+    adapter of the stack, innermost first, inside a single checkpoint, so
+    one residual copy per block is kept for the whole stack instead of
+    one per adapter. Each wrapper's `enabled` switch is read where it
+    sits, so masks behave exactly as in the kept path.
     """
 
     def __init__(self, block: nn.Module, adapter: RelayPatchwork,
@@ -89,19 +104,33 @@ class BlockWithAdapter(nn.Module):
         self.enabled = True
         self.recompute = bool(recompute)
 
-    def _adapt(self, h):
-        if self.recompute and torch.is_grad_enabled():
-            return checkpoint(self.adapter, h, use_reentrant=False,
-                              preserve_rng_state=False)
-        return self.adapter(h)
+    def stack(self):
+        """(wrappers innermost first, the core block) of the stack this
+        wrapper tops."""
+        wraps, core = [], self
+        while isinstance(core, BlockWithAdapter):
+            wraps.append(core)
+            core = core.block
+        wraps.reverse()
+        return wraps, core
 
     def forward(self, *args, **kwargs):
+        if self.recompute and torch.is_grad_enabled():
+            wraps, core = self.stack()
+            out = core(*args, **kwargs)
+            live = [w.adapter for w in wraps if w.enabled]
+            if not live:
+                return out
+            h = out[0] if isinstance(out, tuple) else out
+            y = checkpoint(_apply_chain, h, *live, use_reentrant=False,
+                           preserve_rng_state=False)
+            return (y,) + out[1:] if isinstance(out, tuple) else y
         out = self.block(*args, **kwargs)
         if not self.enabled:
             return out
         if isinstance(out, tuple):
-            return (self._adapt(out[0]),) + out[1:]
-        return self._adapt(out)
+            return (self.adapter(out[0]),) + out[1:]
+        return self.adapter(out)
 
     # Incremental-decode passthroughs (trunks with a cached decode path,
     # e.g. AlephLM prefill/step). The patch head is position-wise, so

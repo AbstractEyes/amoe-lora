@@ -160,6 +160,74 @@ def test_stacked_wrappers_each_carry_the_switch():
     assert all(b.recompute for b in outer)
     assert h1.recompute(False) == 3
     assert all(not b.block.recompute for b in outer)
+    wraps, core = outer[0].stack()
+    assert [w.adapter for w in wraps] == [outer[0].block.adapter, outer[0].adapter]
+    assert isinstance(core, _Block)
+
+
+def _stacked_pair(seed, recompute):
+    torch.manual_seed(seed)
+    m = _StubAlephLM()
+    h1 = amoe.attach(m, _fresh_ck("a1", 32, 3, SPEC, seed=seed + 1), spec=SPEC, recompute=recompute)
+    h2 = amoe.attach(m, _fresh_ck("a2", 32, 3, SPEC, seed=seed + 2), spec=SPEC, recompute=recompute)
+    return m, h1, h2
+
+
+@pytest.mark.parametrize("mask", [("a1", "a2"), ("a2",), ("a1",), ()])
+def test_stacked_chain_matches_eager_under_every_mask(mask):
+    """Two arms stacked (a2 over a1), the kept path vs the one-chain
+    recompute, under each mask: same forward, same gradients, bit for bit."""
+    m_e, e1, e2 = _stacked_pair(11, False)
+    m_r, r1, r2 = _stacked_pair(11, True)
+    for h, hh in ((e1, r1), (e2, r2)):
+        name = h.names[0]
+        h.set_mask({name: name in mask})
+        hh.set_mask({name: name in mask})
+    ids = torch.randint(0, 256, (2, 12))
+    le, _ = m_e(ids)
+    lr, _ = m_r(ids)
+    assert torch.equal(le, lr)
+    le.float().pow(2).mean().backward()
+    lr.float().pow(2).mean().backward()
+    ge, gr = _grads(m_e), _grads(m_r)
+    assert ge.keys() == gr.keys()
+    for k in ge:
+        if ge[k] is None:
+            assert gr[k] is None, k
+        else:
+            assert torch.equal(ge[k], gr[k]), k
+    # a masked member receives no gradient in either path; a live one does
+    for k in ge:
+        if ".adapter." not in k:
+            continue
+        inner = ".block.adapter." in k          # a1 sits inside a2's wrapper
+        live = ("a1" in mask) if inner else ("a2" in mask)
+        got = ge[k] is not None and bool(ge[k].abs().sum() > 0)
+        assert got == live, (k, live)
+
+
+def test_stacked_chain_calls_every_live_adapter_once_per_forward():
+    """Counted with pre-forward hooks: the recompute may stop early inside
+    the last adapter once the tensor the backward asked for is rebuilt, so
+    a post-forward hook would under-count it."""
+    m, h1, h2 = _stacked_pair(5, True)
+    calls = {"a1": 0, "a2": 0}
+    hooks = [b.block.adapter.register_forward_pre_hook(lambda *_: calls.__setitem__("a1", calls["a1"] + 1))
+             for b in m.blocks]
+    hooks += [b.adapter.register_forward_pre_hook(lambda *_: calls.__setitem__("a2", calls["a2"] + 1))
+              for b in m.blocks]
+    ids = torch.randint(0, 256, (1, 8))
+    logits, _ = m(ids)
+    assert calls == {"a1": 3, "a2": 3}
+    logits.float().pow(2).mean().backward()     # the recompute calls each once more
+    assert calls == {"a1": 6, "a2": 6}
+    h1.set_mask({"a1": False})
+    calls.update(a1=0, a2=0)
+    logits, _ = m(ids)
+    logits.float().pow(2).mean().backward()
+    assert calls == {"a1": 0, "a2": 6}
+    for h in hooks:
+        h.remove()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA card")
