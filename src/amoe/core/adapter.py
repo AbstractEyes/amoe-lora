@@ -20,6 +20,7 @@ block for the whole stack.
 """
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 
 import torch
@@ -73,6 +74,30 @@ def _apply_chain(h, *adapters):
     for a in adapters:
         h = a(h)
     return h
+
+
+def _autocast_uncached(device_type: str):
+    """The active autocast region re-entered with its weight-cast cache OFF
+    (0.2.10), for the checkpointed chain. Autocast caches the low-precision
+    copies of parameters it casts; when an earlier pass inside the same
+    autocast region (a no_grad pass with a member masked, as the abstention
+    term runs) already cast a member's weights, the recorded forward of the
+    checkpointed chain holds no cast ops for them, while the recompute,
+    which re-enters autocast fresh, records the casts, and the checkpoint's
+    operator-list check fails ('different metadata'; torch 2.8). With the
+    cache off inside the chain both passes record the same ops. The cost is
+    one bf16 cast of each live adapter's weights per block call."""
+    try:
+        enabled = torch.is_autocast_enabled(device_type)
+    except TypeError:  # older signature: cuda only
+        enabled = device_type == "cuda" and torch.is_autocast_enabled()
+    if not enabled:
+        return contextlib.nullcontext()
+    try:
+        dtype = torch.get_autocast_dtype(device_type)
+    except (TypeError, AttributeError):
+        dtype = torch.get_autocast_gpu_dtype() if device_type == "cuda" else torch.bfloat16
+    return torch.autocast(device_type=device_type, dtype=dtype, cache_enabled=False)
 
 
 # The compiled chain (0.2.9). The aleph address's compiled backward is
@@ -156,8 +181,9 @@ class BlockWithAdapter(nn.Module):
             h = out[0] if isinstance(out, tuple) else out
             fn = compiled_chain() if self.compile_chain else _apply_chain
             if self.recompute and torch.is_grad_enabled():
-                y = checkpoint(fn, h, *live, use_reentrant=False,
-                               preserve_rng_state=False)
+                with _autocast_uncached(h.device.type):
+                    y = checkpoint(fn, h, *live, use_reentrant=False,
+                                   preserve_rng_state=False)
             else:
                 y = fn(h, *live)
             return (y,) + out[1:] if isinstance(out, tuple) else y

@@ -230,6 +230,38 @@ def test_stacked_chain_calls_every_live_adapter_once_per_forward():
         h.remove()
 
 
+def test_recompute_survives_a_cached_autocast_pass_before_the_grad_pass():
+    """The abstention term's sequence: inside ONE autocast region, a no_grad
+    pass with one member masked (autocast caches the other member's weight
+    casts), then the armed pass and its backward. Under torch 2.8 the
+    checkpoint's operator-list check failed here ('different metadata')
+    until the chain ran with the cast cache off (0.2.10); the gradients
+    must equal the kept path's."""
+    m_e, e1, e2 = _stacked_pair(21, False)
+    m_r, r1, r2 = _stacked_pair(21, True)
+    ids = torch.randint(0, 256, (2, 12))
+
+    def run(m, h_first):
+        for p in m.parameters():
+            p.grad = None
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            with torch.no_grad():
+                with h_first.all_off():
+                    m(ids)
+            logits, _ = m(ids)
+        logits.float().pow(2).mean().backward()
+        return logits.detach().float(), _grads(m)
+
+    out_e, g_e = run(m_e, e1)
+    out_r, g_r = run(m_r, r1)
+    assert torch.equal(out_e, out_r)
+    for k in g_e:
+        if g_e[k] is None:
+            assert g_r[k] is None, k
+        else:
+            assert torch.equal(g_e[k], g_r[k]), k
+
+
 def test_compile_switch_is_carried_and_orthogonal():
     torch.manual_seed(0)
     m = _StubAlephLM()
