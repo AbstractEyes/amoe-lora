@@ -75,6 +75,29 @@ def _apply_chain(h, *adapters):
     return h
 
 
+# The compiled chain (0.2.9). The aleph address's compiled backward is
+# non-finite under bf16 autocast unless inductor rounds its fused
+# intermediates to bf16 the way eager does (measured 2026-09: of the
+# adapter's stages compiled alone, only addr.m_hat fails; pure fp32 and
+# emulated casts are clean), so the switch below is set when the chain
+# is first compiled. It is process-global; set it False before the first
+# compile to opt out (not recommended for bf16 training).
+COMPILE_EMULATE_CASTS = True
+COMPILE_MODE = "default"        # reduce-overhead (CUDA graphs) fails inside a checkpointed chain
+_COMPILED_CHAIN = None
+
+
+def compiled_chain():
+    global _COMPILED_CHAIN
+    if _COMPILED_CHAIN is None:
+        if COMPILE_EMULATE_CASTS:
+            import torch._inductor.config as ic
+            ic.emulate_precision_casts = True
+        _COMPILED_CHAIN = torch.compile(_apply_chain, dynamic=False,
+                                        mode=COMPILE_MODE)
+    return _COMPILED_CHAIN
+
+
 class BlockWithAdapter(nn.Module):
     """Wraps one decoder block; hybrid-safe (tuple or tensor output).
 
@@ -94,15 +117,24 @@ class BlockWithAdapter(nn.Module):
     one residual copy per block is kept for the whole stack instead of
     one per adapter. Each wrapper's `enabled` switch is read where it
     sits, so masks behave exactly as in the kept path.
+
+    `compile_chain=True` (0.2.9) runs that same chain through
+    torch.compile (default mode, one graph per mask pattern, shared by
+    every block since the adapters enter as arguments), with or without
+    the recompute; see COMPILE_EMULATE_CASTS above for the precision
+    switch it needs. The compiled and the eager chain agree to bf16
+    rounding, not bit for bit: a training run that switches it on owes a
+    gradient census on its own card first.
     """
 
     def __init__(self, block: nn.Module, adapter: RelayPatchwork,
-                 recompute: bool = False):
+                 recompute: bool = False, compile_chain: bool = False):
         super().__init__()
         self.block = block
         self.adapter = adapter
         self.enabled = True
         self.recompute = bool(recompute)
+        self.compile_chain = bool(compile_chain)
 
     def stack(self):
         """(wrappers innermost first, the core block) of the stack this
@@ -115,15 +147,19 @@ class BlockWithAdapter(nn.Module):
         return wraps, core
 
     def forward(self, *args, **kwargs):
-        if self.recompute and torch.is_grad_enabled():
+        if self.compile_chain or (self.recompute and torch.is_grad_enabled()):
             wraps, core = self.stack()
             out = core(*args, **kwargs)
             live = [w.adapter for w in wraps if w.enabled]
             if not live:
                 return out
             h = out[0] if isinstance(out, tuple) else out
-            y = checkpoint(_apply_chain, h, *live, use_reentrant=False,
-                           preserve_rng_state=False)
+            fn = compiled_chain() if self.compile_chain else _apply_chain
+            if self.recompute and torch.is_grad_enabled():
+                y = checkpoint(fn, h, *live, use_reentrant=False,
+                               preserve_rng_state=False)
+            else:
+                y = fn(h, *live)
             return (y,) + out[1:] if isinstance(out, tuple) else y
         out = self.block(*args, **kwargs)
         if not self.enabled:

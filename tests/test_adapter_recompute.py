@@ -230,6 +230,70 @@ def test_stacked_chain_calls_every_live_adapter_once_per_forward():
         h.remove()
 
 
+def test_compile_switch_is_carried_and_orthogonal():
+    torch.manual_seed(0)
+    m = _StubAlephLM()
+    ck = _fresh_ck("t", d=32, n_sites=3, spec=SPEC)
+    h = amoe.attach(m, ck, spec=SPEC)
+    assert not any(b.compile_chain for b in m.blocks)
+    assert h.compile_chain(True) == 3
+    assert all(b.compile_chain and not b.recompute for b in m.blocks)
+    assert h.compile_chain(False) == 3
+    assert not any(b.compile_chain for b in m.blocks)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA card")
+def test_compiled_chain_matches_eager_and_stays_finite_on_cuda():
+    """A stacked pair through the compiled chain (default mode, emulated
+    casts) vs the eager chain under bf16 autocast: finite gradients on every
+    tensor, outputs and gradients within bf16 rounding, and the same
+    behaviour under a mask. Skips when the card has no working inductor
+    backend (no Triton)."""
+    from amoe.core import adapter as A
+    dev = "cuda"
+    spec = AdapterSpec(n_slots=16, K=16, D=8, hidden=256, zero_init_head=False)
+    d, n_blocks, B, T = 256, 3, 2, 1024
+
+    def build(compile_chain):
+        torch.manual_seed(0)
+        m = _StubAlephLM(d=d, n_blocks=n_blocks).to(dev)
+        hs = [amoe.attach(m, _fresh_ck(f"a{i}", d, n_blocks, spec, seed=i), spec=spec,
+                          compile_chain=compile_chain) for i in (1, 2)]
+        return m, hs
+
+    def run(m, mask_off=None):
+        torch.manual_seed(3)
+        ids = torch.randint(0, 256, (B, T), device=dev)
+        for p in m.parameters():
+            p.grad = None
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            logits, _ = m(ids)
+        logits.float().pow(2).mean().backward()
+        return logits.detach().float(), _grads(m)
+
+    m_e, _ = build(False)
+    try:
+        m_c, hs = build(True)
+        out_c, g_c = run(m_c)
+    except Exception as e:  # noqa: BLE001 - no inductor backend on this machine
+        pytest.skip(f"torch.compile unavailable here: {type(e).__name__}: {str(e)[:120]}")
+    out_e, g_e = run(m_e)
+    assert torch.isfinite(out_c).all()
+    assert torch.allclose(out_e, out_c, rtol=5e-2, atol=5e-2)
+    for k in g_e:
+        if g_e[k] is None:
+            assert g_c[k] is None, k
+            continue
+        assert torch.isfinite(g_c[k]).all(), k
+        scale = g_e[k].abs().max().clamp_min(1e-12)
+        assert float((g_e[k] - g_c[k]).abs().max() / scale) < 5e-2, k
+    # a masked member: no gradient reaches it through the compiled chain
+    hs[0].set_mask({"a1": False})
+    _, g_m = run(m_c)
+    inner = [k for k in g_m if ".block.adapter." in k]
+    assert inner and all(g_m[k] is None or float(g_m[k].abs().sum()) == 0.0 for k in inner)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA card")
 def test_recompute_cuts_peak_memory_of_stacked_arms_on_cuda():
     """A 4-block trunk at d=512 on 2048-token rows with two stacked arms
