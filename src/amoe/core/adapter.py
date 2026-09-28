@@ -109,7 +109,37 @@ def _autocast_uncached(device_type: str):
 # compile to opt out (not recommended for bf16 training).
 COMPILE_EMULATE_CASTS = True
 COMPILE_MODE = "default"        # reduce-overhead (CUDA graphs) fails inside a checkpointed chain
+# The recompile budget and the shape gate (0.2.11). The chain is compiled
+# static (dynamic=False), so every (mask pattern x input shape) pair is one
+# cache entry of `_apply_chain`, and when torch's per-code recompile limit
+# (8 by default) is exceeded dynamo does not merely run that call eagerly:
+# it marks the code object SKIP and the chain runs eager for the rest of the
+# process, with a single warning. An evaluation that feeds the armed model
+# short inputs of many lengths (probe items, chat documents) spends that
+# budget in seconds. Two guards: the dynamo limits are raised to the floors
+# below when the chain is first compiled, and only the first
+# COMPILE_MAX_SHAPES distinct (batch, length) shapes are routed through the
+# compiled chain; any other shape runs the eager chain (exact; the compile's
+# gain is in the training shape, which is the first shape a training run
+# presents). The budget then holds the mask patterns of the training shapes
+# only (m + 1 per shape at m arms).
+COMPILE_RECOMPILE_LIMIT = 64
+COMPILE_ACCUMULATED_LIMIT = 4096
+COMPILE_MAX_SHAPES = 2
 _COMPILED_CHAIN = None
+_COMPILED_SHAPES: set = set()
+
+
+def _raise_dynamo_limits():
+    import torch._dynamo.config as dc
+    for names, floor in ((("recompile_limit", "cache_size_limit"),
+                          COMPILE_RECOMPILE_LIMIT),
+                         (("accumulated_recompile_limit",
+                           "accumulated_cache_size_limit"),
+                          COMPILE_ACCUMULATED_LIMIT)):
+        for name in names:            # 2.8 carries both spellings; older torch one
+            if hasattr(dc, name):
+                setattr(dc, name, max(int(getattr(dc, name)), int(floor)))
 
 
 def compiled_chain():
@@ -118,9 +148,23 @@ def compiled_chain():
         if COMPILE_EMULATE_CASTS:
             import torch._inductor.config as ic
             ic.emulate_precision_casts = True
+        _raise_dynamo_limits()
         _COMPILED_CHAIN = torch.compile(_apply_chain, dynamic=False,
                                         mode=COMPILE_MODE)
     return _COMPILED_CHAIN
+
+
+def chain_for(h):
+    """The chain to run on an input of h's shape (0.2.11): the compiled
+    chain for the first COMPILE_MAX_SHAPES distinct (batch, length) shapes
+    seen, the eager chain for every other shape."""
+    key = (int(h.shape[0]), int(h.shape[1]))
+    if key in _COMPILED_SHAPES:
+        return compiled_chain()
+    if len(_COMPILED_SHAPES) < COMPILE_MAX_SHAPES:
+        _COMPILED_SHAPES.add(key)
+        return compiled_chain()
+    return _apply_chain
 
 
 class BlockWithAdapter(nn.Module):
@@ -179,7 +223,7 @@ class BlockWithAdapter(nn.Module):
             if not live:
                 return out
             h = out[0] if isinstance(out, tuple) else out
-            fn = compiled_chain() if self.compile_chain else _apply_chain
+            fn = chain_for(h) if self.compile_chain else _apply_chain
             if self.recompute and torch.is_grad_enabled():
                 with _autocast_uncached(h.device.type):
                     y = checkpoint(fn, h, *live, use_reentrant=False,
