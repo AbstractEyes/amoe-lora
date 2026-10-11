@@ -102,3 +102,17 @@ matching at bytelex co-boundaries (comparative), 2 seeds, against the
 four SFT-refuted controls — same rows, same positions, same capacity,
 hard labels vs distributions. Bars are numeric and public before
 results; either outcome is a finding.
+
+## 5. The arm families beyond the relay (0.2.5 .. 0.2.12)
+
+The relay (`RelayPatchwork`) is the module every arm of the Beatrix program trained on, under seven recipes. Three
+further families live under `amoe.arms`, each a removable module obeying the same contract (born inert by weight, a key
+subset that ships and detaches alone, pure Adam on its keys, the toggle law and verified detach): the EMA relay (two
+fixed-decay causal averages of the relay's own read as extra head inputs), the recurrent arm (a GRU per site on the
+block's attention output) and, since 0.2.12, the **lookup arm**: zero-born causal softmax attention behind its own
+LayerNorm after chosen blocks, `depth` layers in series, its own key/value cache for decode, attachable to any decoder
+the binding resolver addresses. It exists because an address-based trunk fetches a planted value only within a few
+hundred bytes of its cue while softmax attention fetches it to the end of the context; the arm adds that capacity to a
+frozen trunk. The family map, the recipes and the lookup arm's writeup: `docs/arms/`. Arm-key ownership
+(`amoe.train.ownership`) is the certification every arm trains under: the trunk frozen, the arm's keys under pure Adam,
+the trunk's bytes hashed before and after.

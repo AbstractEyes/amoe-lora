@@ -234,3 +234,9 @@ campaign (16 experiment packages, 2-seed program, the conditioning law).
 
 
 **Technical companion:** [TECHNICAL.md](TECHNICAL.md) — the arm system, its laws, and the Beatrix arm-program results.
+
+**Arm families (0.2.12):** [docs/arms/README.md](docs/arms/README.md) — the relay, the EMA relay, the recurrent arm and the
+**lookup arm** (`amoe.arms.lookup`: a zero-born causal softmax-attention organ that gives a trunk without softmax attention
+content-addressed lookup, attachable to any bound decoder, with depth and its own decode cache; [docs/arms/lookup_arm.md](docs/arms/lookup_arm.md)).
+Arm-key ownership (`amoe.train.ownership`) freezes the trunk, gives pure Adam the arm's keys and proves the trunk did not move by a bit.
+History: [CHANGELOG.md](CHANGELOG.md).
